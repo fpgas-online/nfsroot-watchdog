@@ -55,7 +55,10 @@ status)
 	show reason "reboot reason"
 	if [ -e "$STATE/deadline" ]; then
 		d=$(cat "$STATE/deadline")
-		printf '%-18s %s (in %ss)\n' "reboot at:" "$(date -d "@$d" 2>&1)" "$((d - now))"
+		printf '%-18s %s (in %ss)\n' "reboot at:" "$(date -u -d "@$d" 2>&1)" "$((d - now))"
+	fi
+	if [ -e "$STATE/warned" ]; then
+		printf '%-18s %s\n' "warning sent:" "$(date -u -d "@$(cat "$STATE/warned")" 2>&1)"
 	fi
 	[ "$DRY_RUN" = 1 ] && echo "DRY_RUN: will only log"
 	exit 0

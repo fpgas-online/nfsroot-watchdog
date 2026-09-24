@@ -78,6 +78,8 @@ class Client:
         self.calls = tmp_path / "calls"
         self.kmsg = tmp_path / "kmsg"
         self.hostname = tmp_path / "hostname"
+        self.console = tmp_path / "console"
+        self.dev = tmp_path / "dev"
         self.fakes = fakes
         for d in (self.lower, self.root):
             (d / "etc/nfsroot-watchdog").mkdir(parents=True)
@@ -86,6 +88,8 @@ class Client:
         self.hostname.write_text(hostname + "\n")
         self.calls.write_text("")
         self.kmsg.write_text("")
+        self.console.write_text("")
+        (self.dev / "pts").mkdir(parents=True)
 
         sbin = tmp_path / "sbin"
         sbin.mkdir()
@@ -107,6 +111,8 @@ class Client:
                     f"INHIBIT={self.inhibit}",
                     f"HOSTNAME_FILE={self.hostname}",
                     f"KMSG={self.kmsg}",
+                    f"CONSOLE={self.console}",
+                    f"DEV_DIR={self.dev}",
                     f"SYSTEMCTL={self.systemctl}",
                     f"SYSTEMD_SHUTDOWN={self.systemd_shutdown}",
                     "QUIET_DIRS=/var/lib/dpkg",
@@ -133,6 +139,8 @@ class Client:
             "NFSROOT_WATCHDOG_BUSYBOX": self.busybox,
             "NFSROOT_WATCHDOG_LIBDIR": str(SRC),
             "NFSROOT_WATCHDOG_CONFIG": str(self.config),
+            # Never mount anything, even when the tests run as root.
+            "NFSROOT_WATCHDOG_MOUNT": "no",
         }
         if mounts is not None:
             m = self.config.parent / "mounts"
@@ -149,7 +157,11 @@ class Client:
         for name in ("date", "stat", "who", "reboot"):
             (b / name).unlink()
         s = self.state
-        self._script(b / "date", f'cat "{s}/fake-now"')
+        # The fake clock for "now"; formatting a given time (-d) is real.
+        self._script(
+            b / "date",
+            f'case "$*" in *-d*) exec "{s}/bin/busybox" date "$@" ;; esac; cat "{s}/fake-now"',
+        )
         self._script(b / "who", f'[ -e "{s}/fake-who" ] && cat "{s}/fake-who"; exit 0')
         self._script(b / "reboot", f'echo "reboot $*" >>"{self.calls}"')
         # ESTALE for any path listed in fake-stale, else the real stat.
@@ -217,6 +229,19 @@ exec "{s}/bin/busybox" stat "$@\"""",
     def rebooted(self):
         return [c for c in self.calls.read_text().splitlines() if "reboot" in c]
 
+    def warned_at(self):
+        f = self.state / "warned"
+        return int(f.read_text()) if f.exists() else None
+
+    def run_until_reboot(self, limit=20):
+        """Check once a minute of fake time until the machine reboots."""
+        for _ in range(limit):
+            self.check()
+            if self.rebooted():
+                return self.now
+            self.set_now(self.now + 60)
+        raise AssertionError("no reboot within the limit")
+
 
 @pytest.fixture
 def client(tmp_path):
@@ -276,6 +301,25 @@ def test_arm_finds_the_nfs_root(tmp_path, mounts, armed):
 def test_disabled(tmp_path):
     c = Client(tmp_path, BUSYBOX, config="ENABLED=0")
     assert "disabled" in c.arm()
+    assert not (c.state / "check").exists()
+
+
+@needs_busybox
+def test_arm_failure_says_which_step(tmp_path):
+    c = Client(tmp_path, BUSYBOX)
+    env = {
+        **c.env(),
+        "PATH": str(Path(BUSYBOX).parent) + ":/usr/bin:/bin",
+        "NFSROOT_WATCHDOG_BUSYBOX": str(tmp_path / "no-such-busybox"),
+        "NFSROOT_WATCHDOG_LIBDIR": str(SRC),
+        "NFSROOT_WATCHDOG_CONFIG": str(c.config),
+        "NFSROOT_WATCHDOG_MOUNT": "no",
+    }
+    r = subprocess.run([BUSYBOX, "sh", str(ARM)], env=env, capture_output=True, text=True)
+    assert r.returncode != 0
+    msg = "nfsroot-watchdog-arm: FAILED (exit 1) at step: stage"
+    assert msg in r.stderr
+    assert msg in c.kmsg.read_text()
     assert not (c.state / "check").exists()
 
 
@@ -355,25 +399,36 @@ def test_unchanged_root_never_reboots(client):
 
 
 @needs_busybox
-def test_generation_bump_reboots_at_the_slot(client):
+def test_generation_bump_warns_then_reboots_at_the_slot(client):
     gen = T0 + 1000
     client.set_now(gen + 30)
     client.write_lower(GEN, f"{gen} 2026-09-24T02:00:00Z 3 files changed\n")
     client.check()
-    # base 60 + slot 33 * 20 s, measured from the generation's own timestamp
+    # base 420 + slot 33 * 20 s, measured from the generation's own timestamp
     # so every client shares the same reference point.
-    expected = gen + 60 + 33 * 20
+    expected = gen + 420 + 33 * 20
     assert client.deadline() == expected
     assert "generation changed" in client.kmsg.read_text()
+    assert client.warned_at() is None
+
+    # The warning goes out WARN_BEFORE plus one timer period ahead...
+    client.set_now(expected - 300 - 61)
+    client.check()
+    assert client.warned_at() is None
+    client.set_now(expected - 300 - 60)
+    client.check()
+    assert client.warned_at() == expected - 360
 
     client.set_now(expected - 1)
     client.check()
     assert client.rebooted() == []
 
+    # ...so the reboot still lands on the deadline.
     client.set_now(expected)
     client.check()
     assert client.rebooted() == ["systemctl reboot"]
     assert "rebooting: generation changed" in client.kmsg.read_text()
+    assert "REBOOTING NOW" in client.console.read_text()
 
 
 @needs_busybox
@@ -398,7 +453,7 @@ def test_implausible_generation_time_falls_back_to_local_clock(client):
     client.set_now(T0 + 100)
     client.write_lower(GEN, "999999999999 x\n")
     client.check()
-    assert client.deadline() == T0 + 100 + 60 + 33 * 20
+    assert client.deadline() == T0 + 100 + 420 + 33 * 20
 
 
 @needs_busybox
@@ -470,7 +525,7 @@ def test_unreadable_generation_is_not_a_change(client):
 @needs_busybox
 def test_fleet_and_local_inhibits_hold(client):
     client.write_lower(GEN, f"{T0 + 10} x\n")
-    client.set_now(T0 + 10 + 60 + 33 * 20)  # already past this client's slot
+    client.set_now(T0 + 10 + 420 + 33 * 20)  # already past this client's slot
 
     (client.lower / FLEET_INHIBIT.lstrip("/")).write_text("")
     assert "fleet inhibit" in client.check()
@@ -480,7 +535,9 @@ def test_fleet_and_local_inhibits_hold(client):
     assert "local inhibit" in client.check()
     client.inhibit.unlink()
 
-    client.check()
+    # Released: warned now, rebooted no sooner than WARN_BEFORE later.
+    released = client.now
+    assert client.run_until_reboot() == released + 300
     assert client.rebooted() == ["systemctl reboot"]
 
 
@@ -496,7 +553,7 @@ def test_stale_probe_needs_confirmation_and_a_quiet_root(client):
     client.set_now(T0 + 7260)
     client.check()
     # No generation to share, so the reference is local "now".
-    assert client.deadline() == T0 + 7260 + 60 + 33 * 20
+    assert client.deadline() == T0 + 7260 + 420 + 33 * 20
     assert "stale files for 2 checks: /var/lib/dpkg/status" in client.kmsg.read_text()
 
 
@@ -553,6 +610,10 @@ def test_logged_in_users_defer_the_reboot_up_to_the_grace(client):
     deadline = client.deadline()
     (client.state / "fake-who").write_text("pi pts/0 2026-09-24 02:00 (10.0.0.1)\n")
 
+    client.set_now(deadline - 360)
+    client.check()  # warned, on pi's terminal too
+    assert "will REBOOT" in (client.dev / "pts/0").read_text()
+
     client.set_now(deadline)
     assert "deferring reboot" in client.check()
     assert client.rebooted() == []
@@ -569,7 +630,7 @@ def test_stale_systemd_forces_the_reboot(client):
     client.set_now(T0 + 100)
     client.write_lower(GEN, f"{T0 - 5000} x\n")
     client.stale(str(client.systemd_shutdown))
-    client.check()
+    client.run_until_reboot()
     assert client.rebooted() == ["reboot -f"]
     assert "clean reboot unavailable" in client.kmsg.read_text()
 
@@ -579,20 +640,145 @@ def test_failed_systemctl_falls_back_to_forced_reboot(client):
     client._script(client.systemctl, f'echo "systemctl $*" >>"{client.calls}"; exit 1')
     client.set_now(T0 + 100)
     client.write_lower(GEN, f"{T0 - 5000} x\n")
-    client.check()
+    client.run_until_reboot()
     assert client.rebooted() == ["systemctl reboot", "reboot -f"]
 
 
 @needs_busybox
-def test_dry_run_only_logs_once(tmp_path):
+def test_dry_run_only_logs_once_and_writes_no_terminal(tmp_path):
     c = Client(tmp_path, BUSYBOX, config="DRY_RUN=1")
     c.write_lower(GEN, "old\n")
     c.arm()
+    (c.state / "fake-who").write_text("pi pts/0 2026-09-24 02:00 (10.0.0.1)\n")
     c.write_lower(GEN, f"{T0 - 5000} x\n")
-    c.check()
-    c.check()
+    for _ in range(20):  # past WARN_BEFORE and pi's USER_GRACE (600 s)
+        c.check()
+        c.set_now(c.now + 60)
     assert c.rebooted() == []
     assert c.kmsg.read_text().count("DRY_RUN: would reboot") == 1
+    # The warning is still logged, but no terminal is told a reboot is coming.
+    assert "will REBOOT" in c.kmsg.read_text()
+    assert c.console.read_text() == ""
+    assert not (c.dev / "pts/0").exists()
+
+
+# --- the reboot warning ------------------------------------------------------
+
+
+def _warn(client, who=""):
+    """Schedule a reboot and advance to the moment the warning goes out."""
+    if who:
+        (client.state / "fake-who").write_text(who)
+    client.set_now(T0 + 100)
+    client.write_lower(GEN, f"{T0 + 100} 2026-09-24T03:00:00Z 5 files changed\n")
+    client.check()
+    deadline = client.deadline()
+    client.set_now(deadline - 360)
+    out = client.check()
+    assert client.warned_at() == deadline - 360
+    return deadline, out
+
+
+@needs_busybox
+def test_warning_reaches_console_terminals_journal_and_kmsg(client):
+    who = "pi pts/0 2026-09-24 02:00 (10.0.0.1)\nroot tty1 2026-09-24 01:00\npi pts/0 2026-09-24 02:05 (10.0.0.2)\n"
+    deadline, out = _warn(client, who)
+    hhmm = time.strftime("%H:%M:%S UTC", time.gmtime(deadline))
+    for target in (client.console, client.dev / "pts/0", client.dev / "tty1"):
+        text = target.read_text()
+        assert "node33 will REBOOT in about 6 minutes, at " + hhmm in text, target
+        assert "To STOP this reboot:  sudo nfsroot-watchdog inhibit" in text
+        assert f"sudo touch {client.inhibit}" in text
+        assert "undo with: sudo nfsroot-watchdog release" in text
+        assert "5 files changed" in text
+    # pts/0 appears twice in who but is written once.
+    assert (client.dev / "pts/0").read_text().count("will REBOOT") == 1
+    # The journal gets every line at warning priority, the kernel log too.
+    lines = [l for l in out.splitlines() if l]
+    assert lines and all(l.startswith("<4>") for l in lines)
+    assert "To STOP this reboot" in client.kmsg.read_text()
+
+
+@needs_busybox
+def test_warning_is_sent_once(client):
+    deadline, _ = _warn(client)
+    client.set_now(deadline - 120)
+    client.check()
+    assert client.console.read_text().count("will REBOOT") == 1
+
+
+@needs_busybox
+def test_reboot_never_comes_sooner_than_warn_before_after_the_warning(client):
+    # The clock jumps straight past the deadline (a suspended timer, a
+    # clock step): the warning goes out now and the reboot waits for it.
+    client.set_now(T0 + 100)
+    client.write_lower(GEN, f"{T0 + 100} x\n")
+    client.check()
+    late = client.deadline() + 3600
+    client.set_now(late)
+    client.check()
+    assert client.warned_at() == late
+    assert client.rebooted() == []
+    client.set_now(late + 299)
+    client.check()
+    assert client.rebooted() == []
+    client.set_now(late + 300)
+    client.check()
+    assert client.rebooted() == ["systemctl reboot"]
+
+
+@needs_busybox
+def test_late_notice_still_gets_the_full_warning(client):
+    # A client that notices a generation long after its slot has passed.
+    client.set_now(T0 + 100)
+    client.write_lower(GEN, f"{T0 - 7200} x\n")
+    client.check()
+    assert client.deadline() == T0 + 100 + 300
+    assert client.warned_at() == T0 + 100
+
+
+@needs_busybox
+def test_inhibit_after_the_warning_is_announced(client):
+    deadline, _ = _warn(client, "pi pts/0 2026-09-24 02:00 (10.0.0.1)\n")
+    client.inhibit.write_text("")
+    client.set_now(deadline)
+    client.check()
+    assert client.rebooted() == []
+    for target in (client.console, client.dev / "pts/0"):
+        assert "is CANCELLED: local inhibit" in target.read_text()
+    assert client.warned_at() is None
+    # Released later (and pi has logged out): a fresh warning, and the full
+    # WARN_BEFORE again.
+    client.inhibit.unlink()
+    (client.state / "fake-who").unlink()
+    client.set_now(deadline + 60)
+    assert client.run_until_reboot() == deadline + 60 + 300
+    assert client.console.read_text().count("will REBOOT") == 2
+
+
+@needs_busybox
+def test_update_lock_after_the_warning_is_announced(client):
+    deadline, _ = _warn(client)
+    client.write_lower(LOCK, f"{deadline - 100} x update\n")
+    client.set_now(deadline - 100)
+    client.check()
+    assert "CANCELLED: NFS root update in progress" in client.console.read_text()
+
+
+@needs_busybox
+def test_a_stuck_terminal_does_not_block_the_reboot(client):
+    # Nobody reads this terminal: opening the FIFO for writing blocks.
+    os.mkfifo(client.dev / "pts/9")
+    t = time.monotonic()
+    _warn(client, "pi pts/9 2026-09-24 02:00 (10.0.0.1)\n")
+    assert time.monotonic() - t < 30
+    assert "will REBOOT" in client.console.read_text()
+
+
+@needs_busybox
+def test_odd_tty_names_from_who_are_not_written(client):
+    _warn(client, "x ../../etc/passwd 2026-09-24 02:00\ny /etc/shadow 2026-09-24 02:00\n")
+    assert not (client.dev.parent / "etc").exists()
 
 
 # --- the CLI ---------------------------------------------------------------
@@ -639,7 +825,7 @@ def test_static_busybox_smoke(tmp_path):
     """Arm and check with Debian's static busybox and no fakes: every applet
     resolves inside the binary, and PATH points nowhere."""
     now = int(time.time())
-    c = Client(tmp_path, STATIC_BUSYBOX, fakes=False, config="USER_GRACE=0\nBASE_DELAY=0\nSPACING=0")
+    c = Client(tmp_path, STATIC_BUSYBOX, fakes=False, config="USER_GRACE=0\nBASE_DELAY=0\nSPACING=0\nWARN_BEFORE=0\nCHECK_INTERVAL=0")
     c.write_lower(GEN, "old\n")
     assert "generation 'old', slot 33" in c.arm()
     assert c.check() == ""
@@ -648,3 +834,4 @@ def test_static_busybox_smoke(tmp_path):
     c.write_lower(GEN, f"{now - 100000} x\n")  # implausible: use local now
     c.check()
     assert c.rebooted() == ["systemctl reboot"]
+    assert "will REBOOT" in c.console.read_text()

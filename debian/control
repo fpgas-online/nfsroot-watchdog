@@ -11,7 +11,7 @@ Rules-Requires-Root: no
 
 Package: nfsroot-watchdog
 Architecture: all
-Depends: busybox-static, ${misc:Depends}
+Depends: busybox-static, mount, util-linux, ${misc:Depends}
 Description: reboot NFS-root clients whose root has changed underneath them
  A machine booted from an NFS root caches handles to the files it uses. When
  the server replaces those files (a package upgrade, a configuration run),

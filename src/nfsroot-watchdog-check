@@ -30,7 +30,10 @@
 #   - the fleet-wide inhibit file in the root,
 #   - the per-machine inhibit file (`nfsroot-watchdog inhibit`).
 # Each machine waits BASE_DELAY + slot * SPACING (+ jitter) after the
-# generation's timestamp. Slots are unique per machine when they can be
+# generation's timestamp. At least WARN_BEFORE seconds before rebooting it
+# broadcasts a warning, with how to stop it, to the console, every logged-in
+# terminal, the journal and the kernel log; a warned reboot never happens
+# sooner than that, and calling it off is broadcast too. Slots are unique per machine when they can be
 # derived from the hostname (see SLOT_* in /etc/default/nfsroot-watchdog), so
 # a whole fleet never reboots at once.
 #
@@ -111,11 +114,57 @@ log() {
 # server: often the only record of why a machine rebooted.
 kmsg() {
 	log "$*"
-	echo "nfsroot-watchdog: $*" >"$KMSG" || true
+	echo "nfsroot-watchdog: $*" >>"$KMSG" || true
+}
+
+# Tell everyone: the journal (at warning priority: systemd reads a "<4>"
+# prefix on each stdout line), the kernel log, the console and every
+# terminal someone is logged in on. busybox has no wall(1), so write to the
+# terminals directly; each write is bounded by a timeout, so a terminal
+# nobody is reading cannot hold up the reboot.
+broadcast() {
+	text=$1
+	echo "$text" | while IFS= read -r line; do
+		echo "<4>$line"
+		echo "nfsroot-watchdog: $line" >>"$KMSG" || true
+	done
+	if [ "$DRY_RUN" = 1 ]; then
+		log "DRY_RUN: not writing the message above to any terminal"
+		return 0
+	fi
+	ttys=$CONSOLE
+	for t in $(who | cut -d' ' -f2- | sed 's/^ *//' | cut -d' ' -f1); do
+		case $t in
+		*..* | /* | *[!a-zA-Z0-9/]*) continue ;;
+		esac
+		case " $ttys " in
+		*" $DEV_DIR/$t "*) ;;
+		*) ttys="$ttys $DEV_DIR/$t" ;;
+		esac
+	done
+	for t in $ttys; do
+		# shellcheck disable=SC2016 # $1 is the inner sh's argument
+		printf '\n%s\n\n' "$text" |
+			timeout 5 sh -c 'cat >>"$1"' sh "$t" ||
+			log "could not write the message to $t"
+	done
+}
+
+when() {
+	date -u -d "@$1" '+%H:%M:%S UTC' 2>&1
+}
+
+# If users were told a reboot is coming, tell them it is off.
+cancel_warning() {
+	if [ -e "$STATE/warned" ]; then
+		broadcast "*** nfsroot-watchdog: the reboot of $(cat "$HOSTNAME_FILE") announced for $(when "$(cat "$STATE/deadline" 2>&1)") is CANCELLED: $1 ***"
+		rm -f "$STATE/warned"
+	fi
 }
 
 # Log a hold reason once, not every minute.
 hold() {
+	cancel_warning "$*"
 	if [ "$(cat "$STATE/hold" 2>&1)" != "$*" ]; then
 		log "holding: $*"
 		echo "$*" >"$STATE/hold"
@@ -263,6 +312,7 @@ fi
 if [ -z "$reason" ]; then
 	if [ -e "$STATE/deadline" ]; then
 		log "root is consistent again, cancelling the scheduled reboot"
+		cancel_warning "the NFS root is consistent again"
 	fi
 	rm -f "$STATE/deadline" "$STATE/reason" "$STATE/hold"
 	exit 0
@@ -278,8 +328,10 @@ if [ ! -e "$STATE/deadline" ]; then
 		jit=$((0x$(head -c 8 /dev/urandom | md5sum | cut -c1-6) % JITTER))
 	fi
 	deadline=$((ref + BASE_DELAY + slot * SPACING + jit))
-	if [ "$deadline" -lt "$now" ]; then
-		deadline=$now
+	# Never sooner than the warning allows. With the default BASE_DELAY
+	# this only bites for a machine that noticed the change late.
+	if [ "$deadline" -lt $((now + WARN_BEFORE)) ]; then
+		deadline=$((now + WARN_BEFORE))
 	fi
 	echo "$deadline" >"$STATE/deadline"
 	echo "$reason" >"$STATE/reason"
@@ -287,7 +339,31 @@ if [ ! -e "$STATE/deadline" ]; then
 fi
 
 deadline=$(cat "$STATE/deadline")
+reason=$(cat "$STATE/reason")
+
+# --- warn ----------------------------------------------------------------------
+
+# One timer period early, so that the reboot itself still lands on the
+# deadline rather than a minute after it.
+if [ ! -e "$STATE/warned" ] && [ "$now" -ge $((deadline - WARN_BEFORE - CHECK_INTERVAL)) ]; then
+	host=$(cat "$HOSTNAME_FILE")
+	broadcast "*** nfsroot-watchdog: $host will REBOOT in about $(((deadline - now + 30) / 60)) minutes, at $(when "$deadline") ***
+Why: the NFS root this machine booted from has changed on the server.
+     Files that were replaced there fail here with \"Stale file handle\"
+     until the machine reboots. ($reason)
+To STOP this reboot:  sudo nfsroot-watchdog inhibit
+     (or: sudo touch $INHIBIT). It stays stopped until the next boot;
+     undo with: sudo nfsroot-watchdog release
+To see the plan:      nfsroot-watchdog status"
+	echo "$now" >"$STATE/warned"
+fi
+
 if [ "$now" -lt "$deadline" ]; then
+	exit 0
+fi
+# A warned reboot never comes sooner than WARN_BEFORE after the warning,
+# whatever the clock or the timer did in between.
+if [ "$now" -lt $(($(cat "$STATE/warned") + WARN_BEFORE)) ]; then
 	exit 0
 fi
 
@@ -302,7 +378,6 @@ fi
 
 # --- reboot --------------------------------------------------------------------
 
-reason=$(cat "$STATE/reason")
 if [ "$DRY_RUN" = 1 ]; then
 	if [ ! -e "$STATE/dry-run-fired" ]; then
 		kmsg "DRY_RUN: would reboot now ($reason)"
@@ -312,6 +387,7 @@ if [ "$DRY_RUN" = 1 ]; then
 fi
 
 kmsg "rebooting: $reason"
+broadcast "*** nfsroot-watchdog: $(cat "$HOSTNAME_FILE") is REBOOTING NOW ($reason) ***"
 # A clean reboot needs systemctl AND the systemd-shutdown binary PID 1 execs
 # at the very end; if that exec fails PID 1 freezes ("Failed to execute
 # shutdown binary, freezing") instead of rebooting. If either is stale, skip

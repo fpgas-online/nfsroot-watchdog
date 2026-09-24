@@ -52,10 +52,16 @@ jobs:
       # Install what was just built into a clean container of the same
       # suite: dependencies resolve, the units get enabled, the watchdog
       # stands down on a root that is not NFS, and arms and reacts to a
-      # generation bump against a fake one.
+      # generation bump against a fake one. /run is mounted noexec, as
+      # Debian's initramfs-tools mounts it on every initramfs-booted NFS
+      # root; CAP_SYS_ADMIN (and no AppArmor mount denial) lets the arm
+      # script mount its own tmpfs to execute from, as it does as root at
+      # boot.
       - name: Install test in debian:${{ matrix.suite }}
         run: |
           docker run --rm \
+            --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
+            --tmpfs /run:rw,noexec,nosuid,nodev \
             -v "${PWD}/built-debs:/debs:ro" -v "${PWD}/packaging:/packaging:ro" \
             docker.io/library/debian:${{ matrix.suite }} \
             sh /packaging/install-test.sh
