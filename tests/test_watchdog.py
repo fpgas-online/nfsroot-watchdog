@@ -139,6 +139,8 @@ class Client:
             "NFSROOT_WATCHDOG_BUSYBOX": self.busybox,
             "NFSROOT_WATCHDOG_LIBDIR": str(SRC),
             "NFSROOT_WATCHDOG_CONFIG": str(self.config),
+            # Never mount anything, even when the tests run as root.
+            "NFSROOT_WATCHDOG_MOUNT": "no",
         }
         if mounts is not None:
             m = self.config.parent / "mounts"
@@ -311,6 +313,7 @@ def test_arm_failure_says_which_step(tmp_path):
         "NFSROOT_WATCHDOG_BUSYBOX": str(tmp_path / "no-such-busybox"),
         "NFSROOT_WATCHDOG_LIBDIR": str(SRC),
         "NFSROOT_WATCHDOG_CONFIG": str(c.config),
+        "NFSROOT_WATCHDOG_MOUNT": "no",
     }
     r = subprocess.run([BUSYBOX, "sh", str(ARM)], env=env, capture_output=True, text=True)
     assert r.returncode != 0

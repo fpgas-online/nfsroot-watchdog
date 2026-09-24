@@ -91,10 +91,11 @@ esac
 # /run itself is no place to execute from: Debian's initramfs-tools mounts
 # it noexec (and systemd keeps that mount), which is exactly how every
 # initramfs-booted NFS root starts. So the watchdog gets its own small tmpfs
-# at $STATE, without noexec. Only root can mount; the tests run the script
-# unprivileged and stage into a plain directory.
+# at $STATE, without noexec. Only root can mount; unprivileged runs (and the
+# tests, which set NFSROOT_WATCHDOG_MOUNT=no even as root) stage into a plain
+# directory.
 step="set up $STATE"
-if [ "$(id -u)" = 0 ]; then
+if [ "${NFSROOT_WATCHDOG_MOUNT:-auto}" != no ] && [ "$(id -u)" = 0 ]; then
 	mkdir -p "$STATE"
 	if ! mountpoint -q "$STATE"; then
 		mount -t tmpfs -o mode=0755,nosuid,nodev,size=16m nfsroot-watchdog "$STATE"
