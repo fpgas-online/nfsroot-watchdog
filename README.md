@@ -89,13 +89,15 @@ The next successful update publishes both.
 ## Install
 
 The packages are published as a signed apt repository per Debian suite
-(bookworm, trixie, sid; `Architecture: all`):
+(bookworm, trixie, sid; `Architecture: all`). Use the `fpgas.online` URL: the
+`fpgas-online.github.io` one redirects to it over plain http, which apt will
+not follow.
 
 ```sh
 sudo install -d -m0755 /etc/apt/keyrings
-curl -fsSL https://fpgas-online.github.io/nfsroot-watchdog/nfsroot-watchdog.gpg \
+curl -fsSL https://fpgas.online/nfsroot-watchdog/nfsroot-watchdog.gpg \
   | sudo tee /etc/apt/keyrings/nfsroot-watchdog.gpg >/dev/null
-echo "deb [signed-by=/etc/apt/keyrings/nfsroot-watchdog.gpg] https://fpgas-online.github.io/nfsroot-watchdog/trixie/ ./" \
+echo "deb [signed-by=/etc/apt/keyrings/nfsroot-watchdog.gpg] https://fpgas.online/nfsroot-watchdog/trixie/ ./" \
   | sudo tee /etc/apt/sources.list.d/nfsroot-watchdog.list
 sudo apt update
 

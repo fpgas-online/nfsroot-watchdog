@@ -40,7 +40,7 @@ jobs:
           cd /tmp && apt-get download busybox-static && dpkg-deb -x busybox-static_*.deb /tmp/bbs
       - name: pytest
         run: |
-          static=$(find /tmp/bbs -name busybox -type f | head -n1)
+          static=$(find /tmp/bbs -path '*/bin/busybox' -type f | head -n1)
           test -n "$static"
           export NFSROOT_WATCHDOG_TEST_BUSYBOX=/bin/busybox
           export NFSROOT_WATCHDOG_TEST_STATIC_BUSYBOX="$static"

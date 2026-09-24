@@ -3,7 +3,7 @@ name: Debian Packages + apt repo
 # Rolling release: every GREEN push to main builds nfsroot-watchdog and
 # nfsroot-watchdog-server for Debian bookworm, trixie and sid and republishes
 # a signed apt repository per suite on GitHub Pages
-# (https://fpgas-online.github.io/nfsroot-watchdog/<suite>/). Both packages
+# (https://fpgas.online/nfsroot-watchdog/<suite>/). Both packages
 # are Architecture: all (shell and Python), so one x86 build per suite serves
 # every architecture. The version is git-derived (vX.Y at a tag, vX.Y.postN
 # after it; 0.0.postN before the first tag).
