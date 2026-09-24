@@ -1,0 +1,86 @@
+name: Debian Packages + apt repo
+
+# Rolling release: every GREEN push to main builds nfsroot-watchdog and
+# nfsroot-watchdog-server for Debian bookworm, trixie and sid and republishes
+# a signed apt repository per suite on GitHub Pages
+# (https://fpgas-online.github.io/nfsroot-watchdog/<suite>/). Both packages
+# are Architecture: all (shell and Python), so one x86 build per suite serves
+# every architecture. The version is git-derived (vX.Y at a tag, vX.Y.postN
+# after it; 0.0.postN before the first tag).
+#
+# Gated on CI: triggered when the "CI" workflow completes for main, and only
+# proceeds when that run succeeded, so a red commit never reaches the repo.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+  pull_request:
+
+# Least privilege by default: only the publish job raises this, for itself.
+# actions:read stays because the workflow_run gating reads the CI run.
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build-deb:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'pull_request' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [bookworm, trixie, sid]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The SHA CI validated, not whatever main is now.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0  # full history + tags so deb-version.py can describe
+
+      - name: Build packages in debian:${{ matrix.suite }}
+        run: |
+          docker run --rm \
+            -v "${PWD}:/src" -w /src \
+            docker.io/library/debian:${{ matrix.suite }} \
+            sh packaging/ci-build.sh
+
+      # Install what was just built into a clean container of the same
+      # suite: dependencies resolve, the units get enabled, the watchdog
+      # stands down on a root that is not NFS, and arms and reacts to a
+      # generation bump against a fake one.
+      - name: Install test in debian:${{ matrix.suite }}
+        run: |
+          docker run --rm \
+            -v "${PWD}/built-debs:/debs:ro" -v "${PWD}/packaging:/packaging:ro" \
+            docker.io/library/debian:${{ matrix.suite }} \
+            sh /packaging/install-test.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debs-${{ matrix.suite }}-all
+          path: built-debs/*.deb
+
+  publish-apt:
+    # Build and install-test on PRs, but never publish from one: that would
+    # overwrite the live repository with unreviewed packages.
+    if: github.event_name != 'pull_request'
+    needs: build-deb
+    # Scoped to this job alone: the called workflow cannot exceed it.
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: mithro/apt-repo-action/.github/workflows/publish-apt.yml@main
+    with:
+      suites: "bookworm trixie sid"
+      architectures: "all"
+      origin: nfsroot-watchdog
+      description: "Reboot NFS-root clients whose root has changed underneath them"
+      keyring-name: nfsroot-watchdog.gpg
+    secrets:
+      gpg-private-key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
