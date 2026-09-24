@@ -1,0 +1,10 @@
+/built-debs/
+/debian/.debhelper/
+/debian/debhelper-build-stamp
+/debian/files
+/debian/*.substvars
+/debian/nfsroot-watchdog/
+/debian/nfsroot-watchdog-server/
+/tmp/
+__pycache__/
+.pytest_cache/
