@@ -35,6 +35,8 @@
 
 # Stagger: this machine reboots BASE_DELAY + slot * SPACING seconds (plus up
 # to JITTER, keep it below SPACING) after the generation's timestamp.
+# BASE_DELAY leaves room for noticing the change (up to CHECK_INTERVAL plus
+# NFS attribute caching) and for the WARN_BEFORE warning below.
 #   SLOT      a fixed slot for this machine;
 #   SLOT_SED  a `sed -E` script turning the hostname into numbers n1 n2 ...;
 #             slot = ((n1*SLOT_STRIDE + n2)*SLOT_STRIDE + ...) - SLOT_BASE.
@@ -50,7 +52,15 @@
 #SLOTS=96
 #SPACING=20
 #JITTER=10
-#BASE_DELAY=60
+#BASE_DELAY=420
+
+# At least this long before rebooting, a warning -- with how to stop the
+# reboot -- goes to the journal, the kernel log, CONSOLE and every terminal
+# listed by who(1). A warned reboot never happens sooner than this.
+# CHECK_INTERVAL is how often the timer runs (see nfsroot-watchdog.timer).
+#WARN_BEFORE=300
+#CHECK_INTERVAL=60
+#CONSOLE=/dev/console
 
 # A server update lock older than this is taken to be from an abandoned run.
 #LOCK_MAX_AGE=86400

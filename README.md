@@ -46,8 +46,31 @@ It never reboots while the lock or an inhibit file exists. It never counts a
 read error other than ESTALE as a change. It waits up to an hour for logged-in
 users.
 
+**Warning.** At least five minutes (`WARN_BEFORE`) before rebooting, it
+broadcasts a warning to `/dev/console`, to every terminal `who` lists, to the
+journal (at warning priority) and to the kernel log. The warning says when
+the reboot will happen, why, and how to stop it:
+
+```
+*** nfsroot-watchdog: node33 will REBOOT in about 6 minutes, at 03:25:48 UTC ***
+Why: the NFS root this machine booted from has changed on the server.
+     Files that were replaced there fail here with "Stale file handle"
+     until the machine reboots. (generation changed: ...)
+To STOP this reboot:  sudo nfsroot-watchdog inhibit
+     (or: sudo touch /run/nfsroot-watchdog.inhibit). It stays stopped until the next boot;
+     undo with: sudo nfsroot-watchdog release
+To see the plan:      nfsroot-watchdog status
+```
+
+A warned reboot never happens sooner than `WARN_BEFORE` after the warning,
+even if the clock jumps. If it is called off (an inhibit, a new update lock,
+the root becoming consistent again), that is broadcast too. Each terminal
+write is bounded by a timeout, so a terminal nobody reads cannot delay the
+reboot. `DRY_RUN=1` logs the warning but writes to no terminal.
+
 **Staggering.** Each client reboots at `generation time + BASE_DELAY + slot ×
-SPACING` (60 s + slot × 20 s by default, plus up to 10 s of jitter). Every
+SPACING` (420 s + slot × 20 s by default, plus up to 10 s of jitter; the base
+delay leaves room for noticing the change and for the five-minute warning). Every
 client counts from the same server timestamp, so clients with distinct slots
 never reboot together, however late each one notices. The slot comes from the
 hostname:

@@ -19,12 +19,12 @@ BUSYBOX=${NFSROOT_WATCHDOG_BUSYBOX:-/bin/busybox}
 # Everything the check script reads from its config.
 VARS="LOWER ROOT GEN_FILE LOCK_FILE FLEET_INHIBIT INHIBIT PROBES QUIET_DIRS
 HOSTNAME_FILE KMSG SYSTEMCTL SYSTEMD_SHUTDOWN SLOT SLOT_SED SLOT_STRIDE
-SLOT_BASE SLOTS SPACING JITTER BASE_DELAY CONFIRM QUIET LOCK_MAX_AGE
-USER_GRACE DRY_RUN"
+SLOT_BASE SLOTS SPACING JITTER BASE_DELAY WARN_BEFORE CHECK_INTERVAL CONSOLE
+DEV_DIR CONFIRM QUIET LOCK_MAX_AGE USER_GRACE DRY_RUN"
 
 # Every applet the check script calls. Nothing else is on its PATH, so a
 # missing one fails loudly here rather than silently falling back to the root.
-APPLETS="sh cat cut date grep head md5sum reboot rm sed stat sync touch wc who"
+APPLETS="sh cat cut date grep head md5sum reboot rm sed stat sync timeout touch wc who"
 
 rm -rf "$STATE"
 
