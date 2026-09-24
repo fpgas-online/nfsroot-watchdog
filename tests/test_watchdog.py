@@ -508,6 +508,51 @@ def test_stale_lock_or_fleet_inhibit_still_holds(client):
 
 
 @needs_busybox
+def test_stale_mount_root_reboots_even_though_nothing_is_readable(client):
+    # The server replaced the whole exported directory: the mount's own root
+    # is stale, and with it the lock, the generation and every probe. The
+    # lock in particular must not hold such a machine forever.
+    client.write_lower(LOCK, f"{T0} x update\n")
+    root = str(client.lower) + "/"
+    client.set_now(T0 + 100)
+    client.stale(root, str(client.lower / LOCK.lstrip("/")))
+    out = client.check()
+    assert "answers ESTALE (check 1 of 2)" in out
+    assert client.deadline() is None
+
+    client.set_now(T0 + 160)
+    client.check()
+    assert not (client.state / "hold").exists()  # the unreadable lock holds nothing
+    assert client.deadline() == T0 + 160 + 420 + 33 * 20
+    assert "is stale for 2 checks" in client.kmsg.read_text()
+    assert client.run_until_reboot(limit=40)
+    assert client.rebooted() == ["systemctl reboot"]
+    assert "will REBOOT" in client.console.read_text()
+
+
+@needs_busybox
+def test_stale_mount_root_still_honours_the_local_inhibit(client):
+    client.stale(str(client.lower) + "/")
+    client.inhibit.write_text("")
+    for i in range(3):
+        client.set_now(T0 + 100 + 60 * i)
+        assert "local inhibit" in client.check() or i > 0
+    assert client.deadline() is None
+
+
+@needs_busybox
+def test_mount_stale_count_resets_when_the_mount_recovers(client):
+    root = str(client.lower) + "/"
+    client.stale(root)
+    client.check()
+    client.stale()
+    client.check()
+    client.stale(root)
+    client.check()
+    assert client.deadline() is None
+
+
+@needs_busybox
 def test_unreadable_generation_is_not_a_change(client):
     marker = client.lower / GEN.lstrip("/")
     client.set_now(T0 + 7200)

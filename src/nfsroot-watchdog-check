@@ -223,90 +223,124 @@ plausible_epoch() {
 if [ -e "$INHIBIT" ]; then
 	hold "local inhibit $INHIBIT exists"
 fi
-if lower_exists "$FLEET_INHIBIT"; then
-	hold "fleet inhibit $FLEET_INHIBIT exists in the NFS root"
+# The NFS mount itself: if the server replaced the whole exported directory
+# (not just files in it), the mount's own root answers ESTALE and nothing on
+# it -- lock, generation, probes, fleet inhibit -- can ever be read again.
+# Only a reboot remounts it; confirm it like a stale probe, then go straight
+# to scheduling (still staggered, still warned, still held by the local
+# inhibit above).
+mount_stale=
+if ! out=$(stat -c %i "$LOWER/" 2>&1); then
+	case $out in
+	*"Stale file handle"*) mount_stale=1 ;;
+	esac
 fi
-
-lock=$(read_lower "$LOCK_FILE")
-if [ "$lock" != none ]; then
-	lock_epoch=${lock%% *}
-	# An unreadable or unparseable lock, or a clock we cannot trust, still
-	# holds: rebooting into a half-built root is worse than waiting.
-	if ! is_number "$lock_epoch" || [ "$lock_epoch" -gt $((now + 300)) ] ||
-		[ $((now - lock_epoch)) -lt "$LOCK_MAX_AGE" ]; then
-		rm -f "$STATE/stale-count"
-		hold "NFS root update in progress ($LOCK_FILE: $lock)"
+mcount=0
+if [ -n "$mount_stale" ]; then
+	if [ -e "$STATE/mount-stale-count" ]; then
+		mcount=$(cat "$STATE/mount-stale-count")
 	fi
-	if [ ! -e "$STATE/old-lock" ]; then
-		log "ignoring update lock older than ${LOCK_MAX_AGE}s: $lock"
-		touch "$STATE/old-lock"
-	fi
+	mcount=$((mcount + 1))
 fi
-
-# --- triggers ----------------------------------------------------------------
+echo "$mcount" >"$STATE/mount-stale-count"
 
 reason=
 ref=$now
 
-boot_gen=$(cat "$STATE/boot-generation")
-gen=$(read_lower "$GEN_FILE")
-case $gen in
-unreadable:*)
-	# Not evidence of a change: never reboot on an error we cannot place.
-	log "cannot read $GEN_FILE: $gen"
-	gen=$boot_gen
-	;;
-esac
-if [ "$gen" != "$boot_gen" ]; then
-	reason="generation changed: booted with '$boot_gen', root now '$gen'"
-	gen_epoch=${gen%% *}
-	if plausible_epoch "$gen_epoch"; then
-		ref=$gen_epoch
+# Everything that needs the NFS root to be readable.
+examine_root() {
+	if lower_exists "$FLEET_INHIBIT"; then
+		hold "fleet inhibit $FLEET_INHIBIT exists in the NFS root"
 	fi
-fi
 
-# stat through the running root: a replaced file answers ESTALE (or,
-# sometimes, ENOENT), while its directory and every untouched file stay fine.
-stale=
-for p in $PROBES; do
-	if out=$(stat -c %i "$ROOT$p" 2>&1); then
-		continue
-	fi
-	case $out in
-	*"Stale file handle"*)
-		stale="$stale $p"
-		;;
-	*"No such file"*)
-		if grep -qxF -e "$p" "$STATE/probes-present"; then
-			stale="$stale $p(gone)"
+	lock=$(read_lower "$LOCK_FILE")
+	if [ "$lock" != none ]; then
+		lock_epoch=${lock%% *}
+		# An unreadable or unparseable lock, or a clock we cannot trust, still
+		# holds: rebooting into a half-built root is worse than waiting.
+		if ! is_number "$lock_epoch" || [ "$lock_epoch" -gt $((now + 300)) ] ||
+			[ $((now - lock_epoch)) -lt "$LOCK_MAX_AGE" ]; then
+			rm -f "$STATE/stale-count"
+			hold "NFS root update in progress ($LOCK_FILE: $lock)"
 		fi
+		if [ ! -e "$STATE/old-lock" ]; then
+			log "ignoring update lock older than ${LOCK_MAX_AGE}s: $lock"
+			touch "$STATE/old-lock"
+		fi
+	fi
+
+	# --- triggers ----------------------------------------------------------------
+
+	boot_gen=$(cat "$STATE/boot-generation")
+	gen=$(read_lower "$GEN_FILE")
+	case $gen in
+	unreadable:*)
+		# Not evidence of a change: never reboot on an error we cannot place.
+		log "cannot read $GEN_FILE: $gen"
+		gen=$boot_gen
 		;;
-	*) log "probe $p: $out" ;;
 	esac
-done
-
-count=0
-if [ -n "$stale" ]; then
-	if [ -e "$STATE/stale-count" ]; then
-		count=$(cat "$STATE/stale-count")
+	if [ "$gen" != "$boot_gen" ]; then
+		reason="generation changed: booted with '$boot_gen', root now '$gen'"
+		gen_epoch=${gen%% *}
+		if plausible_epoch "$gen_epoch"; then
+			ref=$gen_epoch
+		fi
 	fi
-	count=$((count + 1))
-fi
-echo "$count" >"$STATE/stale-count"
 
-if [ -z "$reason" ] && [ "$count" -ge "$CONFIRM" ]; then
-	# No generation bump, so nothing says the change is finished. A root
-	# changed without nfsroot-generation is only trusted once its busiest
-	# directories have been still for QUIET seconds.
-	newest=0
-	for d in $QUIET_DIRS; do
-		m=$(stat -c %Y "$LOWER$d" 2>&1) || continue
-		is_number "$m" && [ "$m" -gt "$newest" ] && newest=$m
+	# stat through the running root: a replaced file answers ESTALE (or,
+	# sometimes, ENOENT), while its directory and every untouched file stay fine.
+	stale=
+	for p in $PROBES; do
+		if out=$(stat -c %i "$ROOT$p" 2>&1); then
+			continue
+		fi
+		case $out in
+		*"Stale file handle"*)
+			stale="$stale $p"
+			;;
+		*"No such file"*)
+			if grep -qxF -e "$p" "$STATE/probes-present"; then
+				stale="$stale $p(gone)"
+			fi
+			;;
+		*) log "probe $p: $out" ;;
+		esac
 	done
-	if [ "$newest" -gt $((now + 300)) ] || [ $((now - newest)) -lt "$QUIET" ]; then
-		hold "stale files:$stale, but the NFS root changed $((now - newest))s ago (< ${QUIET}s)"
+
+	count=0
+	if [ -n "$stale" ]; then
+		if [ -e "$STATE/stale-count" ]; then
+			count=$(cat "$STATE/stale-count")
+		fi
+		count=$((count + 1))
 	fi
-	reason="stale files for $count checks:$stale"
+	echo "$count" >"$STATE/stale-count"
+
+	if [ -z "$reason" ] && [ "$count" -ge "$CONFIRM" ]; then
+		# No generation bump, so nothing says the change is finished. A root
+		# changed without nfsroot-generation is only trusted once its busiest
+		# directories have been still for QUIET seconds.
+		newest=0
+		for d in $QUIET_DIRS; do
+			m=$(stat -c %Y "$LOWER$d" 2>&1) || continue
+			is_number "$m" && [ "$m" -gt "$newest" ] && newest=$m
+		done
+		if [ "$newest" -gt $((now + 300)) ] || [ $((now - newest)) -lt "$QUIET" ]; then
+			hold "stale files:$stale, but the NFS root changed $((now - newest))s ago (< ${QUIET}s)"
+		fi
+		reason="stale files for $count checks:$stale"
+	fi
+}
+
+if [ -n "$mount_stale" ]; then
+	if [ "$mcount" -lt "$CONFIRM" ]; then
+		log "the NFS mount at ${LOWER:-/} answers ESTALE (check $mcount of $CONFIRM)"
+		exit 0
+	fi
+	reason="the NFS mount at ${LOWER:-/} is stale for $mcount checks (the server replaced the exported directory)"
+else
+	examine_root
 fi
 
 if [ -z "$reason" ]; then

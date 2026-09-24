@@ -42,7 +42,13 @@ reboots when:
    has been quiet for an hour. This catches updates made without
    `nfsroot-generation`.
 
-It never reboots while the lock or an inhibit file exists. It never counts a
+3. **the NFS mount itself is stale**, on two checks in a row. That happens
+   when the server replaces the whole exported directory rather than files
+   inside it. Nothing on the mount, not even the lock, can be read after
+   that, so this trigger only waits for the confirmation. The stagger, the
+   warning and the local inhibit still apply.
+
+Otherwise it never reboots while the lock or an inhibit file exists. It never counts a
 read error other than ESTALE as a change. It waits up to an hour for logged-in
 users.
 
