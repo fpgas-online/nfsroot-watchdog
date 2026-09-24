@@ -26,8 +26,25 @@ DEV_DIR CONFIRM QUIET LOCK_MAX_AGE USER_GRACE DRY_RUN"
 # missing one fails loudly here rather than silently falling back to the root.
 APPLETS="sh cat cut date grep head md5sum reboot rm sed stat sync timeout touch wc who"
 
-rm -rf "$STATE"
+# Under set -e a failure ends the script with only the failing command's own
+# message, in the journal. Say which step failed, in the journal and in the
+# kernel log, which reaches the console (and netconsole) even when nobody can
+# read the journal.
+step=start
+on_exit() {
+	rc=$?
+	if [ "$rc" -ne 0 ]; then
+		echo "nfsroot-watchdog-arm: FAILED (exit $rc) at step: $step" >&2
+		echo "nfsroot-watchdog-arm: FAILED (exit $rc) at step: $step" >>"${KMSG:-/dev/kmsg}" || true
+	fi
+}
+trap on_exit EXIT
 
+# Whatever happens below, never leave a previous boot's (or run's) check
+# script where nfsroot-watchdog.service would run it.
+rm -f "$STATE/check"
+
+step="read $LIBDIR/defaults and $CONFIG"
 # shellcheck source=/dev/null
 . "$LIBDIR/defaults"
 if [ -e "$CONFIG" ]; then
@@ -51,6 +68,7 @@ fstype_at() {
 	fs=
 }
 
+step="find the NFS root in $MOUNTS"
 if [ "$LOWER" = auto ]; then
 	case $(fstype_at /media/root-ro) in
 	nfs | nfs4) LOWER=/media/root-ro ;;
@@ -70,8 +88,30 @@ case " $PROBES " in
 *) PROBES="$PROBES $GEN_FILE" ;;
 esac
 
+# /run itself is no place to execute from: Debian's initramfs-tools mounts
+# it noexec (and systemd keeps that mount), which is exactly how every
+# initramfs-booted NFS root starts. So the watchdog gets its own small tmpfs
+# at $STATE, without noexec. Only root can mount; the tests run the script
+# unprivileged and stage into a plain directory.
+step="set up $STATE"
+if [ "$(id -u)" = 0 ]; then
+	mkdir -p "$STATE"
+	if ! mountpoint -q "$STATE"; then
+		mount -t tmpfs -o mode=0755,nosuid,nodev,size=16m nfsroot-watchdog "$STATE"
+	fi
+	find "$STATE" -mindepth 1 -delete
+else
+	rm -rf "$STATE"
+	mkdir -p "$STATE"
+fi
+
+step="stage $BUSYBOX into $STATE/bin"
 mkdir -p "$STATE/bin"
 cp "$BUSYBOX" "$STATE/bin/busybox"
+if ! "$STATE/bin/busybox" true; then
+	echo "cannot execute $STATE/bin/busybox (is $STATE on a noexec mount?)" >&2
+	exit 1
+fi
 for a in $APPLETS; do
 	"$STATE/bin/busybox" --list | grep -qxF -e "$a" || {
 		echo "busybox at $BUSYBOX has no '$a' applet" >&2
@@ -80,6 +120,7 @@ for a in $APPLETS; do
 	ln -s busybox "$STATE/bin/$a"
 done
 
+step="write $STATE/config"
 # The resolved configuration, one single-quoted assignment per variable.
 for v in $VARS; do
 	eval "val=\${$v}"
@@ -87,12 +128,14 @@ for v in $VARS; do
 	printf "%s='%s'\n" "$v" "$(printf '%s' "$val" | sed "s/'/'\\\\''/g")"
 done >"$STATE/config"
 
+step="record the boot generation from $LOWER$GEN_FILE"
 if [ -e "$LOWER$GEN_FILE" ]; then
 	head -n 1 "$LOWER$GEN_FILE" >"$STATE/boot-generation"
 else
 	echo none >"$STATE/boot-generation"
 fi
 
+step="record which probes exist"
 # stat also primes the overlay's dentry cache, which is what later turns a
 # replaced file into ESTALE rather than a silent switch to the new copy.
 : >"$STATE/probes-present"
@@ -102,9 +145,11 @@ for p in $PROBES; do
 	fi
 done
 
+step="stage the check script"
 # Last: its presence is what lets nfsroot-watchdog.service run.
 cp "$LIBDIR/nfsroot-watchdog-check" "$STATE/check"
 
+step="report"
 echo "armed: NFS root at '${LOWER:-/}', generation '$(cat "$STATE/boot-generation")'," \
 	"slot $("$STATE/bin/sh" "$STATE/check" slot "$(cat "$HOSTNAME_FILE")")," \
 	"probes: $(tr '\n' ' ' <"$STATE/probes-present")"

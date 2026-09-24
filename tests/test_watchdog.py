@@ -302,6 +302,24 @@ def test_disabled(tmp_path):
     assert not (c.state / "check").exists()
 
 
+@needs_busybox
+def test_arm_failure_says_which_step(tmp_path):
+    c = Client(tmp_path, BUSYBOX)
+    env = {
+        **c.env(),
+        "PATH": str(Path(BUSYBOX).parent) + ":/usr/bin:/bin",
+        "NFSROOT_WATCHDOG_BUSYBOX": str(tmp_path / "no-such-busybox"),
+        "NFSROOT_WATCHDOG_LIBDIR": str(SRC),
+        "NFSROOT_WATCHDOG_CONFIG": str(c.config),
+    }
+    r = subprocess.run([BUSYBOX, "sh", str(ARM)], env=env, capture_output=True, text=True)
+    assert r.returncode != 0
+    msg = "nfsroot-watchdog-arm: FAILED (exit 1) at step: stage"
+    assert msg in r.stderr
+    assert msg in c.kmsg.read_text()
+    assert not (c.state / "check").exists()
+
+
 # --- stagger slots -------------------------------------------------------
 
 
