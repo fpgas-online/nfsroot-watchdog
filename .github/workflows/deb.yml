@@ -79,8 +79,6 @@ jobs:
     with:
       suites: "bookworm trixie sid"
       architectures: "all"
-      origin: nfsroot-watchdog
       description: "Reboot NFS-root clients whose root has changed underneath them"
-      keyring-name: nfsroot-watchdog.gpg
     secrets:
       gpg-private-key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
