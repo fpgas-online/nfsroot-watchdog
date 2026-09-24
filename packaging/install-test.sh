@@ -12,6 +12,10 @@ apt-get install -y /debs/nfsroot-watchdog_*.deb /debs/nfsroot-watchdog-server_*.
 # busybox-static came in as a dependency.
 dpkg -s busybox-static | grep -qx 'Status: install ok installed'
 
+# The container's /run is noexec, like an initramfs-booted root's (see
+# .github/workflows/deb.yml): the arm script must stage into its own tmpfs.
+grep ' /run ' /proc/mounts | grep -q noexec
+
 # Units are enabled; nothing tried to start the arm unit (no systemd here,
 # and it must only ever run at boot anyway).
 test -L /etc/systemd/system/multi-user.target.wants/nfsroot-watchdog-arm.service
@@ -37,6 +41,7 @@ SPACING=0
 JITTER=0
 CONF
 /usr/lib/nfsroot-watchdog/nfsroot-watchdog-arm
+mountpoint /run/nfsroot-watchdog
 /run/nfsroot-watchdog/bin/busybox sh /run/nfsroot-watchdog/check | tee /tmp/check0.out
 test ! -s /tmp/check0.out
 nfsroot-watchdog status
