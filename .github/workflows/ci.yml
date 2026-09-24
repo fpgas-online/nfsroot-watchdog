@@ -18,6 +18,11 @@ jobs:
           shellcheck src/nfsroot-watchdog src/nfsroot-watchdog-arm
           src/nfsroot-watchdog-check src/defaults debian/nfsroot-watchdog.default
           packaging/ci-build.sh packaging/install-test.sh
+      # ci-build.sh rewrites debian/changelog with the git-derived version on
+      # every build; a local build's output must never be committed in its
+      # place (it pins a stale version and names a commit that may not exist).
+      - name: debian/changelog is the placeholder
+        run: grep -q '^  \* Placeholder changelog\.' debian/changelog
 
   test:
     # The clients run whatever busybox their root's suite has: bookworm's
