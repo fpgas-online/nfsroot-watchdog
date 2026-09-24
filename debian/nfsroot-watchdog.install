@@ -1,4 +1,4 @@
-src/nfsroot-watchdog usr/sbin
+src/nfsroot-watchdog usr/bin
 src/nfsroot-watchdog-arm usr/lib/nfsroot-watchdog
 src/nfsroot-watchdog-check usr/lib/nfsroot-watchdog
 src/defaults usr/lib/nfsroot-watchdog

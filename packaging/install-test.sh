@@ -62,6 +62,13 @@ grep -q 'To STOP this reboot' /tmp/kmsg
 nfsroot-watchdog status | tee /tmp/status.out
 grep -q '^warning sent:' /tmp/status.out
 
+# The warning tells whoever is logged in to run `nfsroot-watchdog status`:
+# that has to work for an ordinary user, whose PATH (Debian's default, no
+# sbin) is all they have.
+su -s /bin/sh nobody -c 'env PATH=/usr/local/bin:/usr/bin:/bin nfsroot-watchdog status' |
+	tee /tmp/status-user.out
+grep -q '^warning sent:' /tmp/status-user.out
+
 # Following the instructions stops it, and says so.
 nfsroot-watchdog inhibit
 /run/nfsroot-watchdog/bin/busybox sh /run/nfsroot-watchdog/check
