@@ -1,0 +1,14 @@
+[Unit]
+Description=Reboot this machine if its NFS root has changed underneath it
+Documentation=https://github.com/fpgas-online/nfsroot-watchdog
+# Staged by nfsroot-watchdog-arm. Nothing here may come from the NFS root:
+# the point is to keep working after the root has gone stale.
+ConditionPathExists=/run/nfsroot-watchdog/check
+After=nfsroot-watchdog-arm.service
+
+[Service]
+Type=oneshot
+ExecStart=/run/nfsroot-watchdog/bin/busybox sh /run/nfsroot-watchdog/check
+# NFS roots are hard mounts: if the server is down the check blocks rather
+# than failing, and must never read that as "stale".
+TimeoutStartSec=5min

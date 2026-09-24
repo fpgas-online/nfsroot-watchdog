@@ -1,0 +1,254 @@
+#!/usr/bin/python3
+"""nfsroot-generation -- tell NFS-root clients when an update of their root is finished.
+
+Runs on the machine that updates an exported NFS root, and drives the
+server half of the protocol nfsroot-watchdog clients follow:
+
+    nfsroot-generation begin ROOT        take the update lock
+    ... change ROOT (apt in a chroot, config management, rsync, ...) ...
+    nfsroot-generation end ROOT          bump the generation if ROOT changed,
+                                         then release the lock
+
+    nfsroot-generation run ROOT -- CMD   begin, CMD, end; the lock stays if
+                                         CMD fails
+    nfsroot-generation scan ROOT         what changed since `begin` (JSON)
+    nfsroot-generation status ROOT       lock and generation, as clients see them
+
+Clients hold still while the lock exists: files may already be going stale
+under them, but rebooting into a half-updated root is worse than waiting.
+Once the generation changes they reboot themselves, each in its own
+stagger slot.
+
+What counts as a change
+-----------------------
+Any file or symlink whose ctime is not older than the lock's. A file replaced by
+rename (dpkg, most config-management tools) is a new inode, and every client
+that had it open or cached gets ESTALE for the old one. ctime rather than
+mtime because dpkg unpacks files with the package's own old mtimes and some
+tools copy mtimes (`cp -p`, `rsync -t`); userspace cannot set a ctime.
+Directories do not count: their ctime moves whenever a temp file comes and
+goes, and a real change shows up as a changed file inside them. Build
+scratch, caches and logs (--ignore, with sensible defaults) do not count
+either.
+
+`begin` keeps an existing lock, so after a failed update the next
+successful one also publishes what the failed one changed. `end` without a
+lock cannot tell what changed and bumps.
+"""
+
+import argparse
+import datetime
+import fnmatch
+import json
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+
+GEN_FILE = "/etc/nfsroot-watchdog/generation"
+LOCK_FILE = "/etc/nfsroot-watchdog/update.lock"
+FLEET_INHIBIT = "/etc/nfsroot-watchdog/inhibit"
+
+# Paths (relative to the root, fnmatch patterns) whose changes never reach a
+# running client.
+DEFAULT_IGNORE = [
+    "tmp",
+    "var/tmp",
+    "var/cache",
+    "var/log",
+    "var/lib/apt/lists",
+    "var/lib/swcatalog",
+    "root/.ansible",
+    "home/*/.ansible",
+    "run",
+    "proc",
+    "sys",
+    "dev",
+]
+
+
+def _inside(root, path):
+    return os.path.join(root, path.lstrip("/"))
+
+
+def _stamp(label):
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return f"{int(now.timestamp())} {now.strftime('%Y-%m-%dT%H:%M:%SZ')} {label}"
+
+
+def _write_atomic(path, content):
+    """Temp file + rename: a new inode, as clients expect of the marker."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".nfsroot-generation.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
+def _ignored(rel, patterns):
+    return any(fnmatch.fnmatchcase(rel, p) for p in patterns)
+
+
+def scan(root, lock=LOCK_FILE, ignore=(), sample_size=20):
+    """Files and symlinks under ROOT changed since the lock was taken."""
+    patterns = [p.strip("/") for p in (*DEFAULT_IGNORE, *ignore)]
+    patterns += [p.lstrip("/") for p in (LOCK_FILE, GEN_FILE, FLEET_INHIBIT, lock)]
+    try:
+        since_ns = os.lstat(_inside(root, lock)).st_ctime_ns
+    except FileNotFoundError:
+        return {
+            "bump": True,
+            "count": None,
+            "reason": f"no update lock at {lock}, cannot tell what changed",
+            "sample": [],
+        }
+    root_dev = os.lstat(root).st_dev
+    count = 0
+    sample = []
+    stack = [""]
+    while stack:
+        rel_dir = stack.pop()
+        try:
+            entries = list(os.scandir(os.path.join(root, rel_dir)))
+        except OSError as e:
+            print(f"nfsroot-generation: cannot list /{rel_dir}: {e}", file=sys.stderr)
+            continue
+        for entry in entries:
+            rel = os.path.join(rel_dir, entry.name)
+            if _ignored(rel, patterns):
+                continue
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue  # removed since the listing
+            if stat.S_ISDIR(st.st_mode):
+                if st.st_dev == root_dev:  # like find -xdev
+                    stack.append(rel)
+                continue
+            # >=, not >: ctime is stamped from the kernel's coarse clock
+            # tick, so a change made right after `begin` can share the
+            # lock's exact ctime.
+            if st.st_ctime_ns >= since_ns:
+                count += 1
+                if len(sample) < sample_size:
+                    sample.append("/" + rel)
+    return {
+        "bump": count > 0,
+        "count": count,
+        "reason": f"{count} files changed" if count else "nothing changed",
+        "sample": sorted(sample),
+    }
+
+
+def begin(root, lock=LOCK_FILE, label="update"):
+    path = _inside(root, lock)
+    if os.path.exists(path):
+        with open(path) as f:
+            return {"lock": lock, "taken": False, "content": f.readline().strip()}
+    # O_EXCL: two concurrent `begin`s must not both think they took it.
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    content = _stamp(label)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        return begin(root, lock, label)
+    with os.fdopen(fd, "w") as f:
+        f.write(content + "\n")
+    return {"lock": lock, "taken": True, "content": content}
+
+
+def end(root, lock=LOCK_FILE, gen=GEN_FILE, ignore=(), bump="auto", sample_size=20):
+    result = scan(root, lock, ignore, sample_size)
+    do_bump = bump == "always" or (bump == "auto" and result["bump"])
+    result["bumped"] = do_bump
+    if do_bump:
+        result["generation"] = _stamp(result["reason"])
+        # Marker before unlock: a client must never see "unlocked" while
+        # the generation still names the old root.
+        _write_atomic(_inside(root, gen), result["generation"] + "\n")
+    try:
+        os.unlink(_inside(root, lock))
+    except FileNotFoundError:
+        pass
+    return result
+
+
+def status(root, lock=LOCK_FILE, gen=GEN_FILE):
+    out = {}
+    for key, rel in (("lock", lock), ("generation", gen), ("fleet_inhibit", FLEET_INHIBIT)):
+        try:
+            with open(_inside(root, rel)) as f:
+                out[key] = f.readline().strip()
+        except FileNotFoundError:
+            out[key] = None
+    return out
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        prog="nfsroot-generation",
+        description=__doc__.splitlines()[0].split(" -- ", 1)[1],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="\n".join(__doc__.splitlines()[2:]),
+    )
+    ap.add_argument("--lock", default=LOCK_FILE, help=f"lock path inside the root ({LOCK_FILE})")
+    ap.add_argument("--generation", default=GEN_FILE, help=f"marker path inside the root ({GEN_FILE})")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def with_root(p):
+        p.add_argument("root", help="the exported root tree, e.g. /srv/nfs/root")
+        return p
+
+    def with_scan(p):
+        p.add_argument("--ignore", action="append", default=[], metavar="PATTERN",
+                       help="also ignore this path (relative to the root, fnmatch); repeatable")
+        p.add_argument("--sample", type=int, default=20, help="changed paths to list")
+        return p
+
+    b = with_root(sub.add_parser("begin", help="take the update lock"))
+    b.add_argument("--label", default="update", help="free text recorded in the lock")
+    with_scan(with_root(sub.add_parser("scan", help="what changed since begin")))
+    e = with_scan(with_root(sub.add_parser("end", help="bump if changed, release the lock")))
+    e.add_argument("--bump", choices=("auto", "always", "never"), default="auto")
+    with_root(sub.add_parser("status", help="lock and generation"))
+    r = with_scan(with_root(sub.add_parser("run", help="begin, run a command, end")))
+    r.add_argument("--bump", choices=("auto", "always", "never"), default="auto")
+    r.add_argument("command", nargs=argparse.REMAINDER, help="-- command to run")
+
+    args = ap.parse_args(argv)
+    if not os.path.isdir(args.root):
+        ap.error(f"{args.root} is not a directory")
+
+    if args.cmd == "begin":
+        result = begin(args.root, args.lock, args.label)
+    elif args.cmd == "scan":
+        result = scan(args.root, args.lock, args.ignore, args.sample)
+    elif args.cmd == "end":
+        result = end(args.root, args.lock, args.generation, args.ignore, args.bump, args.sample)
+    elif args.cmd == "status":
+        result = status(args.root, args.lock, args.generation)
+    else:
+        command = args.command[1:] if args.command[:1] == ["--"] else args.command
+        if not command:
+            ap.error("run needs a command after --")
+        begin(args.root, args.lock, "run: " + " ".join(command))
+        rc = subprocess.call(command)
+        if rc != 0:
+            print(f"nfsroot-generation: command failed (exit {rc}); leaving the update lock "
+                  f"{args.lock} in place, clients will not reboot into this root",
+                  file=sys.stderr)
+            return rc
+        result = end(args.root, args.lock, args.generation, args.ignore, args.bump, args.sample)
+    json.dump(result, sys.stdout)
+    print()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

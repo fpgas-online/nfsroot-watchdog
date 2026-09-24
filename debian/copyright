@@ -1,0 +1,11 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: nfsroot-watchdog
+Source: https://github.com/fpgas-online/nfsroot-watchdog
+
+Files: *
+Copyright: 2026 Tim 'mithro' Ansell <me@mith.ro>
+License: Apache-2.0
+
+License: Apache-2.0
+ On Debian systems, the full text of the Apache License, Version 2.0 can be
+ found in /usr/share/common-licenses/Apache-2.0.

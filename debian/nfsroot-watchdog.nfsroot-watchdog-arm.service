@@ -1,0 +1,14 @@
+[Unit]
+Description=Stage the NFS-root watchdog into /run
+Documentation=https://github.com/fpgas-online/nfsroot-watchdog
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Reads the root while it is still the one this machine booted; exits
+# quietly without staging anything on a machine that is not an NFS root.
+ExecStart=/usr/lib/nfsroot-watchdog/nfsroot-watchdog-arm
+
+[Install]
+WantedBy=multi-user.target

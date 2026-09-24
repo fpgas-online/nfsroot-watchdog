@@ -1,0 +1,11 @@
+[Unit]
+Description=Check once a minute whether the NFS root has changed underneath this machine
+Documentation=https://github.com/fpgas-online/nfsroot-watchdog
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

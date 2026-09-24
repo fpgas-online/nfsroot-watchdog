@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - run: >-
+          shellcheck src/nfsroot-watchdog src/nfsroot-watchdog-arm
+          src/nfsroot-watchdog-check src/defaults debian/nfsroot-watchdog.default
+          packaging/ci-build.sh packaging/install-test.sh
+
+  test:
+    # The clients run whatever busybox their root's suite has: bookworm's
+    # 1.35 (Raspberry Pi OS) and trixie's 1.37 both have to work.
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [bookworm, trixie]
+    runs-on: ubuntu-latest
+    container: debian:${{ matrix.suite }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install test dependencies
+        run: |
+          apt-get update
+          # busybox: the dynamic, non-standalone build the logic tests fake
+          # applets around. busybox-static conflicts with it, so unpack
+          # that one for the smoke test instead of installing it.
+          apt-get install -y --no-install-recommends busybox python3 python3-pytest
+          cd /tmp && apt-get download busybox-static && dpkg-deb -x busybox-static_*.deb /tmp/bbs
+      - name: pytest
+        run: |
+          static=$(find /tmp/bbs -path '*/bin/busybox' -type f | head -n1)
+          test -n "$static"
+          export NFSROOT_WATCHDOG_TEST_BUSYBOX=/bin/busybox
+          export NFSROOT_WATCHDOG_TEST_STATIC_BUSYBOX="$static"
+          python3 -m pytest -v -rs tests/

@@ -1,0 +1,60 @@
+# shellcheck shell=sh disable=SC2034
+# /etc/default/nfsroot-watchdog -- settings for nfsroot-watchdog
+#
+# Read once per boot by nfsroot-watchdog-arm, which copies the result into
+# /run/nfsroot-watchdog; changes take effect at the next boot. Every setting
+# below is shown with its built-in default.
+
+# 0 disables the watchdog entirely.
+#ENABLED=1
+
+# Where the NFS root is mounted, as the server currently has it. "auto":
+# overlayroot's lower layer /media/root-ro if that is an NFS mount, else /
+# itself if it is one; anything else disables the watchdog.
+#LOWER=auto
+
+# Written into the root by the server, see nfsroot-generation(1). Paths
+# inside the root.
+#GEN_FILE=/etc/nfsroot-watchdog/generation
+#LOCK_FILE=/etc/nfsroot-watchdog/update.lock
+# Create this file in the root to stop every client from rebooting itself.
+#FLEET_INHIBIT=/etc/nfsroot-watchdog/inhibit
+# Create this file on one client to stop it (`nfsroot-watchdog inhibit`).
+#INHIBIT=/run/nfsroot-watchdog.inhibit
+
+# Files that updates to this root are known to replace. Only replaced files
+# go stale, so pick ones your updates really rewrite. GEN_FILE is always
+# added.
+#PROBES="/var/lib/dpkg/status /etc/ld.so.cache"
+# Without a generation bump, a stale root is only trusted once these
+# directories in the NFS root have been unchanged for QUIET seconds.
+#QUIET_DIRS="/var/lib/dpkg /var/lib/dpkg/updates /boot /etc /usr/bin /usr/lib"
+#QUIET=3600
+# Consecutive checks (one a minute) a probe must be stale for.
+#CONFIRM=2
+
+# Stagger: this machine reboots BASE_DELAY + slot * SPACING seconds (plus up
+# to JITTER, keep it below SPACING) after the generation's timestamp.
+#   SLOT      a fixed slot for this machine;
+#   SLOT_SED  a `sed -E` script turning the hostname into numbers n1 n2 ...;
+#             slot = ((n1*SLOT_STRIDE + n2)*SLOT_STRIDE + ...) - SLOT_BASE.
+#             Example, hostnames pi-sw<switch>-p<port> on 48-port switches:
+#               SLOT_SED='s/^pi-sw([0-9]+)-p([0-9]+)$/\1 \2/'
+#               SLOT_STRIDE=48 SLOT_BASE=49
+#   else      the hostname's trailing number (node07 -> 7), else a hash.
+# Slots wrap at SLOTS, so SLOTS * SPACING is the longest wait.
+#SLOT=
+#SLOT_SED=
+#SLOT_STRIDE=1000
+#SLOT_BASE=0
+#SLOTS=96
+#SPACING=20
+#JITTER=10
+#BASE_DELAY=60
+
+# A server update lock older than this is taken to be from an abandoned run.
+#LOCK_MAX_AGE=86400
+# How long a due reboot waits for logged-in users (who).
+#USER_GRACE=3600
+# 1: log "would reboot" instead of rebooting.
+#DRY_RUN=0

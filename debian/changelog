@@ -1,0 +1,5 @@
+nfsroot-watchdog (0.0.post2) unstable; urgency=medium
+
+  * Automated build from git (86796f0).
+
+ -- Tim 'mithro' Ansell <me@mith.ro>  Thu, 24 Sep 2026 12:34:29 +0930

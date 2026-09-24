@@ -1,0 +1,13 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+# One dh_installsystemd per unit name: the package ships more than one.
+# The arm unit must only ever run at boot. Starting or restarting it from a
+# maintainer script would re-stage from the root as it is NOW and overwrite
+# the generation recorded at boot, which is the change it exists to notice.
+# The check service has no [Install] section; the timer starts it.
+override_dh_installsystemd:
+	dh_installsystemd -pnfsroot-watchdog --name=nfsroot-watchdog-arm --no-start
+	dh_installsystemd -pnfsroot-watchdog --name=nfsroot-watchdog

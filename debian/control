@@ -1,0 +1,41 @@
+Source: nfsroot-watchdog
+Section: admin
+Priority: optional
+Maintainer: Tim 'mithro' Ansell <me@mith.ro>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Homepage: https://github.com/fpgas-online/nfsroot-watchdog
+Vcs-Git: https://github.com/fpgas-online/nfsroot-watchdog.git
+Vcs-Browser: https://github.com/fpgas-online/nfsroot-watchdog
+Rules-Requires-Root: no
+
+Package: nfsroot-watchdog
+Architecture: all
+Depends: busybox-static, ${misc:Depends}
+Description: reboot NFS-root clients whose root has changed underneath them
+ A machine booted from an NFS root caches handles to the files it uses. When
+ the server replaces those files (a package upgrade, a configuration run),
+ the client gets "Stale file handle" for them until it reboots, while
+ everything already running carries on as if nothing happened.
+ .
+ nfsroot-watchdog checks once a minute and reboots the machine when the
+ server marks its root as updated (see nfsroot-watchdog-server), or when
+ known files stay stale. It waits while an update is in progress, and staggers
+ the reboots of a whole fleet so that no two machines go down together. It runs
+ from a static busybox copied into /run at boot, so a stale root cannot stop
+ it.
+ .
+ Install this in the client root. It does nothing on a machine whose root is
+ not NFS.
+
+Package: nfsroot-watchdog-server
+Architecture: all
+Depends: python3, ${misc:Depends}
+Description: mark NFS-root updates as finished for nfsroot-watchdog clients
+ nfsroot-generation takes an update lock inside an exported NFS root before
+ it is changed, and afterwards bumps a generation marker if anything really
+ changed, then releases the lock. nfsroot-watchdog clients hold still while
+ the lock exists and reboot themselves, staggered, once the generation
+ changes.
+ .
+ Install this on the machine that updates the root.

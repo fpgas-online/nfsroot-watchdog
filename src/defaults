@@ -1,0 +1,29 @@
+# shellcheck shell=sh disable=SC2034
+# Built-in defaults for nfsroot-watchdog. Do not edit: override in
+# /etc/default/nfsroot-watchdog, which is read after this file.
+ENABLED=1
+LOWER=auto
+ROOT=
+GEN_FILE=/etc/nfsroot-watchdog/generation
+LOCK_FILE=/etc/nfsroot-watchdog/update.lock
+FLEET_INHIBIT=/etc/nfsroot-watchdog/inhibit
+INHIBIT=/run/nfsroot-watchdog.inhibit
+PROBES="/var/lib/dpkg/status /etc/ld.so.cache"
+QUIET_DIRS="/var/lib/dpkg /var/lib/dpkg/updates /boot /etc /usr/bin /usr/lib"
+HOSTNAME_FILE=/proc/sys/kernel/hostname
+KMSG=/dev/kmsg
+SYSTEMCTL=/usr/bin/systemctl
+SYSTEMD_SHUTDOWN=/usr/lib/systemd/systemd-shutdown
+SLOT=
+SLOT_SED=
+SLOT_STRIDE=1000
+SLOT_BASE=0
+SLOTS=96
+SPACING=20
+JITTER=10
+BASE_DELAY=60
+CONFIRM=2
+QUIET=3600
+LOCK_MAX_AGE=86400
+USER_GRACE=3600
+DRY_RUN=0
