@@ -1,0 +1,82 @@
+#!/bin/sh
+# nfsroot-watchdog -- look at, or pin, this machine's NFS-root watchdog.
+#
+#   nfsroot-watchdog status     what the watchdog sees and plans
+#   nfsroot-watchdog inhibit    stop this machine rebooting itself until
+#                               the next boot (or `release`)
+#   nfsroot-watchdog release    undo inhibit
+#   nfsroot-watchdog check      run one check now
+#   nfsroot-watchdog slot [NAME]  stagger slot for NAME (default: this host)
+
+set -eu
+
+STATE=${NFSROOT_WATCHDOG_STATE:-/run/nfsroot-watchdog}
+
+usage() {
+	sed -n '2,10s/^# \{0,1\}//p' "$0" >&2
+	exit 2
+}
+
+armed() {
+	if [ ! -e "$STATE/check" ]; then
+		echo "nfsroot-watchdog is not armed on this machine" \
+			"(see: journalctl -u nfsroot-watchdog-arm)" >&2
+		exit 1
+	fi
+	# shellcheck source=/dev/null
+	. "$STATE/config"
+}
+
+show() {
+	if [ -e "$STATE/$1" ]; then
+		printf '%-18s %s\n' "$2:" "$(cat "$STATE/$1")"
+	fi
+}
+
+case ${1:-status} in
+status)
+	armed
+	now=$(date +%s)
+	printf '%-18s %s\n' "NFS root:" "${LOWER:-/}"
+	printf '%-18s %s\n' "slot:" "$("$STATE/bin/sh" "$STATE/check" slot "$(cat "$HOSTNAME_FILE")")"
+	show boot-generation "booted generation"
+	if [ -e "$LOWER$GEN_FILE" ]; then
+		printf '%-18s %s\n' "root generation:" "$(head -n 1 "$LOWER$GEN_FILE")"
+	else
+		printf '%-18s %s\n' "root generation:" none
+	fi
+	if [ -e "$LOWER$LOCK_FILE" ]; then
+		printf '%-18s %s\n' "update lock:" "$(head -n 1 "$LOWER$LOCK_FILE")"
+	fi
+	[ -e "$INHIBIT" ] && printf '%-18s %s\n' "inhibited:" "$INHIBIT"
+	[ -e "$LOWER$FLEET_INHIBIT" ] && printf '%-18s %s\n' "fleet inhibited:" "$FLEET_INHIBIT"
+	show hold holding
+	show stale-count "stale checks"
+	show reason "reboot reason"
+	if [ -e "$STATE/deadline" ]; then
+		d=$(cat "$STATE/deadline")
+		printf '%-18s %s (in %ss)\n' "reboot at:" "$(date -d "@$d" 2>&1)" "$((d - now))"
+	fi
+	[ "$DRY_RUN" = 1 ] && echo "DRY_RUN: will only log"
+	exit 0
+	;;
+inhibit)
+	armed
+	touch "$INHIBIT"
+	echo "inhibited until next boot: $INHIBIT"
+	;;
+release)
+	armed
+	rm -f "$INHIBIT"
+	echo "released"
+	;;
+check)
+	armed
+	exec systemctl start nfsroot-watchdog.service
+	;;
+slot)
+	armed
+	exec "$STATE/bin/sh" "$STATE/check" slot "${2:-$(cat "$HOSTNAME_FILE")}"
+	;;
+*) usage ;;
+esac

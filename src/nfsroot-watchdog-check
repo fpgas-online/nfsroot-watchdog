@@ -1,0 +1,325 @@
+#!/bin/sh
+# nfsroot-watchdog-check -- reboot this machine once its NFS root has changed
+# underneath it.
+#
+# A client that boots from an NFS root, typically read-only with an
+# overlayroot tmpfs on top, caches file handles to the files it has used.
+# When the server replaces a file in the exported tree (dpkg unpacking a
+# package, dpkg rewriting /var/lib/dpkg/status, a config-management tool
+# writing a temp file and renaming it), the old inode is gone and the client
+# gets "Stale file handle" (ESTALE) for it from then on. Running processes
+# carry on, so the machine looks healthy; anything that opens a replaced file
+# fails. Only a reboot fixes it.
+#
+# This script is run by nfsroot-watchdog.timer, but NOT from the NFS root:
+# nfsroot-watchdog-arm copies it, a static busybox and the configuration into
+# /run at boot. A root that went stale under us cannot stop us from running,
+# or from rebooting.
+#
+# Triggers, in order of preference:
+#   1. generation: the server has changed GEN_FILE since this machine booted.
+#      `nfsroot-generation end` (package nfsroot-watchdog-server) writes it
+#      as the last step of an update that changed the root.
+#   2. stale: a probe file has gone stale (ESTALE, or vanished) on CONFIRM
+#      consecutive checks, and the NFS root's busiest directories have been
+#      quiet for QUIET seconds. Catches root changes made without
+#      nfsroot-generation.
+# Holds (checked first, any one stops a reboot):
+#   - the server's update lock (an update is part-way through changing the
+#     root; rebooting now would boot a half-built root),
+#   - the fleet-wide inhibit file in the root,
+#   - the per-machine inhibit file (`nfsroot-watchdog inhibit`).
+# Each machine waits BASE_DELAY + slot * SPACING (+ jitter) after the
+# generation's timestamp. Slots are unique per machine when they can be
+# derived from the hostname (see SLOT_* in /etc/default/nfsroot-watchdog), so
+# a whole fleet never reboots at once.
+#
+#   nfsroot-watchdog-check            run one check (what the timer does)
+#   nfsroot-watchdog-check slot NAME  print the stagger slot for hostname NAME
+
+set -u
+
+STATE=${NFSROOT_WATCHDOG_STATE:-/run/nfsroot-watchdog}
+# shellcheck source=/dev/null
+. "$STATE/config"
+PATH=$STATE/bin
+LC_ALL=C
+export PATH LC_ALL
+
+# --- stagger slot --------------------------------------------------------
+
+# Strip leading zeros: shell arithmetic reads "08" as a bad octal number.
+decimal() {
+	d=$(echo "$1" | sed 's/^0*//')
+	echo "${d:-0}"
+}
+
+# The machine's slot, 0 <= slot < SLOTS:
+#   SLOT        a fixed number, if set;
+#   SLOT_SED    a `sed -E` script turning the hostname into numbers
+#               n1 n2 ...; slot = ((n1*STRIDE + n2)*STRIDE + ...) - SLOT_BASE.
+#               e.g. 's/^pi-sw([0-9]+)-p([0-9]+)$/\1 \2/', STRIDE 48, BASE 49
+#               gives switch/port placement (sw1 p1 -> 0, sw2 p1 -> 48);
+#   otherwise   the hostname's trailing number (node07 -> 7),
+#   else        a hash of the hostname.
+slot_for() {
+	name=$1
+	if [ -n "${SLOT:-}" ]; then
+		echo $(($(decimal "$SLOT") % ${SLOTS:?}))
+		return
+	fi
+	if [ -n "${SLOT_SED:-}" ]; then
+		nums=$(echo "$name" | sed -E -n "${SLOT_SED}p")
+		case "$nums" in
+		'' | *[!0-9\ ]*) ;;
+		*)
+			v=0
+			for n in $nums; do
+				v=$((v * SLOT_STRIDE + $(decimal "$n")))
+			done
+			v=$((v - SLOT_BASE))
+			if [ "$v" -ge 0 ]; then
+				echo $((v % SLOTS))
+				return
+			fi
+			;;
+		esac
+	fi
+	n=$(echo "$name" | sed -n 's/^.*[^0-9]\([0-9][0-9]*\)$/\1/p')
+	if [ -n "$n" ]; then
+		echo $(($(decimal "$n") % SLOTS))
+		return
+	fi
+	h=$(echo "$name" | md5sum | cut -c1-6)
+	echo $((0x$h % SLOTS))
+}
+
+if [ "${1:-}" = slot ]; then
+	slot_for "$2"
+	exit 0
+fi
+
+# --- helpers ---------------------------------------------------------------
+
+now=$(date +%s)
+
+log() {
+	echo "$*"
+}
+
+# The kernel log survives on the console and, with netconsole, on the
+# server: often the only record of why a machine rebooted.
+kmsg() {
+	log "$*"
+	echo "nfsroot-watchdog: $*" >"$KMSG" || true
+}
+
+# Log a hold reason once, not every minute.
+hold() {
+	if [ "$(cat "$STATE/hold" 2>&1)" != "$*" ]; then
+		log "holding: $*"
+		echo "$*" >"$STATE/hold"
+	fi
+	rm -f "$STATE/deadline" "$STATE/reason"
+	exit 0
+}
+
+# Does a file in the NFS root exist? Only a genuine ENOENT says no: `[ -e ]`
+# would also say no for ESTALE, and a lock or inhibit that is merely
+# unreadable must still hold.
+lower_exists() {
+	if out=$(stat -c %i "$LOWER$1" 2>&1); then
+		return 0
+	fi
+	case $out in
+	*"No such file"*) return 1 ;;
+	esac
+	log "treating $1 as present: $out"
+	return 0
+}
+
+# First line of a file in the NFS root ("<epoch> ..."), "none" if absent,
+# "estale" if the NFS mount itself answers ESTALE.
+read_lower() {
+	f=$LOWER$1
+	if ! lower_exists "$1"; then
+		echo none
+		return
+	fi
+	if out=$(head -n 1 "$f" 2>&1); then
+		echo "$out"
+	else
+		case $out in
+		*"Stale file handle"*) echo estale ;;
+		*) echo "unreadable: $out" ;;
+		esac
+	fi
+}
+
+is_number() {
+	case ${1:-x} in
+	*[!0-9]*) return 1 ;;
+	esac
+}
+
+# A server timestamp we can do arithmetic with: numeric, not in our future
+# (beyond 5 min of clock skew) and not older than LOCK_MAX_AGE. Machines
+# without a synced clock fail this and fall back to their own "now".
+plausible_epoch() {
+	is_number "$1" && [ "$1" -le $((now + 300)) ] && [ $((now - $1)) -lt "$LOCK_MAX_AGE" ]
+}
+
+# --- holds -------------------------------------------------------------------
+
+if [ -e "$INHIBIT" ]; then
+	hold "local inhibit $INHIBIT exists"
+fi
+if lower_exists "$FLEET_INHIBIT"; then
+	hold "fleet inhibit $FLEET_INHIBIT exists in the NFS root"
+fi
+
+lock=$(read_lower "$LOCK_FILE")
+if [ "$lock" != none ]; then
+	lock_epoch=${lock%% *}
+	# An unreadable or unparseable lock, or a clock we cannot trust, still
+	# holds: rebooting into a half-built root is worse than waiting.
+	if ! is_number "$lock_epoch" || [ "$lock_epoch" -gt $((now + 300)) ] ||
+		[ $((now - lock_epoch)) -lt "$LOCK_MAX_AGE" ]; then
+		rm -f "$STATE/stale-count"
+		hold "NFS root update in progress ($LOCK_FILE: $lock)"
+	fi
+	if [ ! -e "$STATE/old-lock" ]; then
+		log "ignoring update lock older than ${LOCK_MAX_AGE}s: $lock"
+		touch "$STATE/old-lock"
+	fi
+fi
+
+# --- triggers ----------------------------------------------------------------
+
+reason=
+ref=$now
+
+boot_gen=$(cat "$STATE/boot-generation")
+gen=$(read_lower "$GEN_FILE")
+case $gen in
+unreadable:*)
+	# Not evidence of a change: never reboot on an error we cannot place.
+	log "cannot read $GEN_FILE: $gen"
+	gen=$boot_gen
+	;;
+esac
+if [ "$gen" != "$boot_gen" ]; then
+	reason="generation changed: booted with '$boot_gen', root now '$gen'"
+	gen_epoch=${gen%% *}
+	if plausible_epoch "$gen_epoch"; then
+		ref=$gen_epoch
+	fi
+fi
+
+# stat through the running root: a replaced file answers ESTALE (or,
+# sometimes, ENOENT), while its directory and every untouched file stay fine.
+stale=
+for p in $PROBES; do
+	if out=$(stat -c %i "$ROOT$p" 2>&1); then
+		continue
+	fi
+	case $out in
+	*"Stale file handle"*)
+		stale="$stale $p"
+		;;
+	*"No such file"*)
+		if grep -qxF -e "$p" "$STATE/probes-present"; then
+			stale="$stale $p(gone)"
+		fi
+		;;
+	*) log "probe $p: $out" ;;
+	esac
+done
+
+count=0
+if [ -n "$stale" ]; then
+	if [ -e "$STATE/stale-count" ]; then
+		count=$(cat "$STATE/stale-count")
+	fi
+	count=$((count + 1))
+fi
+echo "$count" >"$STATE/stale-count"
+
+if [ -z "$reason" ] && [ "$count" -ge "$CONFIRM" ]; then
+	# No generation bump, so nothing says the change is finished. A root
+	# changed without nfsroot-generation is only trusted once its busiest
+	# directories have been still for QUIET seconds.
+	newest=0
+	for d in $QUIET_DIRS; do
+		m=$(stat -c %Y "$LOWER$d" 2>&1) || continue
+		is_number "$m" && [ "$m" -gt "$newest" ] && newest=$m
+	done
+	if [ "$newest" -gt $((now + 300)) ] || [ $((now - newest)) -lt "$QUIET" ]; then
+		hold "stale files:$stale, but the NFS root changed $((now - newest))s ago (< ${QUIET}s)"
+	fi
+	reason="stale files for $count checks:$stale"
+fi
+
+if [ -z "$reason" ]; then
+	if [ -e "$STATE/deadline" ]; then
+		log "root is consistent again, cancelling the scheduled reboot"
+	fi
+	rm -f "$STATE/deadline" "$STATE/reason" "$STATE/hold"
+	exit 0
+fi
+rm -f "$STATE/hold"
+
+# --- schedule ------------------------------------------------------------------
+
+if [ ! -e "$STATE/deadline" ]; then
+	slot=$(slot_for "$(cat "$HOSTNAME_FILE")")
+	jit=0
+	if [ "$JITTER" -gt 0 ]; then
+		jit=$((0x$(head -c 8 /dev/urandom | md5sum | cut -c1-6) % JITTER))
+	fi
+	deadline=$((ref + BASE_DELAY + slot * SPACING + jit))
+	if [ "$deadline" -lt "$now" ]; then
+		deadline=$now
+	fi
+	echo "$deadline" >"$STATE/deadline"
+	echo "$reason" >"$STATE/reason"
+	kmsg "$reason; slot $slot, rebooting in $((deadline - now))s"
+fi
+
+deadline=$(cat "$STATE/deadline")
+if [ "$now" -lt "$deadline" ]; then
+	exit 0
+fi
+
+users=$(who | wc -l)
+if [ "$users" -gt 0 ] && [ "$now" -lt $((deadline + USER_GRACE)) ]; then
+	if [ ! -e "$STATE/user-wait" ]; then
+		log "deferring reboot up to ${USER_GRACE}s: $users login session(s)"
+		touch "$STATE/user-wait"
+	fi
+	exit 0
+fi
+
+# --- reboot --------------------------------------------------------------------
+
+reason=$(cat "$STATE/reason")
+if [ "$DRY_RUN" = 1 ]; then
+	if [ ! -e "$STATE/dry-run-fired" ]; then
+		kmsg "DRY_RUN: would reboot now ($reason)"
+		touch "$STATE/dry-run-fired"
+	fi
+	exit 0
+fi
+
+kmsg "rebooting: $reason"
+# A clean reboot needs systemctl AND the systemd-shutdown binary PID 1 execs
+# at the very end; if that exec fails PID 1 freezes ("Failed to execute
+# shutdown binary, freezing") instead of rebooting. If either is stale, skip
+# straight to a forced reboot: an NFS root client has nothing local to flush
+# beyond what sync covers.
+if stat "$SYSTEMCTL" "$SYSTEMD_SHUTDOWN" >/dev/null && "$SYSTEMCTL" reboot; then
+	exit 0
+fi
+kmsg "clean reboot unavailable, forcing"
+sync
+reboot -f

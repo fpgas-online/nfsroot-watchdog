@@ -1,0 +1,110 @@
+#!/bin/sh
+# nfsroot-watchdog-arm -- stage the watchdog into /run at boot.
+#
+# Runs once per boot, while the NFS root is still consistent with what this
+# machine booted. Copies a static busybox, the check script and the resolved
+# configuration into /run (tmpfs, never paged back out to NFS), and records
+# what the root looked like at boot: the server's generation marker and which
+# probe files exist. From then on nfsroot-watchdog.service runs only from
+# /run. See nfsroot-watchdog-check for the whole story.
+
+set -eu
+
+STATE=${NFSROOT_WATCHDOG_STATE:-/run/nfsroot-watchdog}
+LIBDIR=${NFSROOT_WATCHDOG_LIBDIR:-/usr/lib/nfsroot-watchdog}
+CONFIG=${NFSROOT_WATCHDOG_CONFIG:-/etc/default/nfsroot-watchdog}
+MOUNTS=${NFSROOT_WATCHDOG_MOUNTS:-/proc/mounts}
+BUSYBOX=${NFSROOT_WATCHDOG_BUSYBOX:-/bin/busybox}
+
+# Everything the check script reads from its config.
+VARS="LOWER ROOT GEN_FILE LOCK_FILE FLEET_INHIBIT INHIBIT PROBES QUIET_DIRS
+HOSTNAME_FILE KMSG SYSTEMCTL SYSTEMD_SHUTDOWN SLOT SLOT_SED SLOT_STRIDE
+SLOT_BASE SLOTS SPACING JITTER BASE_DELAY CONFIRM QUIET LOCK_MAX_AGE
+USER_GRACE DRY_RUN"
+
+# Every applet the check script calls. Nothing else is on its PATH, so a
+# missing one fails loudly here rather than silently falling back to the root.
+APPLETS="sh cat cut date grep head md5sum reboot rm sed stat sync touch wc who"
+
+rm -rf "$STATE"
+
+# shellcheck source=/dev/null
+. "$LIBDIR/defaults"
+if [ -e "$CONFIG" ]; then
+	# shellcheck source=/dev/null
+	. "$CONFIG"
+fi
+
+if [ "$ENABLED" != 1 ]; then
+	echo "disabled (ENABLED=$ENABLED in $CONFIG)"
+	exit 0
+fi
+
+# fstype of the mount at $1, from /proc/mounts
+fstype_at() {
+	while read -r _dev mnt type _rest; do
+		if [ "$mnt" = "$1" ]; then
+			fs=$type
+		fi
+	done <"$MOUNTS"
+	echo "${fs:-}"
+	fs=
+}
+
+if [ "$LOWER" = auto ]; then
+	case $(fstype_at /media/root-ro) in
+	nfs | nfs4) LOWER=/media/root-ro ;;
+	*)
+		case $(fstype_at /) in
+		nfs | nfs4) LOWER= ;;
+		*)
+			echo "not an NFS root (no NFS mount at /media/root-ro or /), nothing to watch"
+			exit 0
+			;;
+		esac
+		;;
+	esac
+fi
+case " $PROBES " in
+*" $GEN_FILE "*) ;;
+*) PROBES="$PROBES $GEN_FILE" ;;
+esac
+
+mkdir -p "$STATE/bin"
+cp "$BUSYBOX" "$STATE/bin/busybox"
+for a in $APPLETS; do
+	"$STATE/bin/busybox" --list | grep -qxF -e "$a" || {
+		echo "busybox at $BUSYBOX has no '$a' applet" >&2
+		exit 1
+	}
+	ln -s busybox "$STATE/bin/$a"
+done
+
+# The resolved configuration, one single-quoted assignment per variable.
+for v in $VARS; do
+	eval "val=\${$v}"
+	# shellcheck disable=SC2154 # assigned by the eval
+	printf "%s='%s'\n" "$v" "$(printf '%s' "$val" | sed "s/'/'\\\\''/g")"
+done >"$STATE/config"
+
+if [ -e "$LOWER$GEN_FILE" ]; then
+	head -n 1 "$LOWER$GEN_FILE" >"$STATE/boot-generation"
+else
+	echo none >"$STATE/boot-generation"
+fi
+
+# stat also primes the overlay's dentry cache, which is what later turns a
+# replaced file into ESTALE rather than a silent switch to the new copy.
+: >"$STATE/probes-present"
+for p in $PROBES; do
+	if stat "$ROOT$p" >/dev/null; then
+		echo "$p" >>"$STATE/probes-present"
+	fi
+done
+
+# Last: its presence is what lets nfsroot-watchdog.service run.
+cp "$LIBDIR/nfsroot-watchdog-check" "$STATE/check"
+
+echo "armed: NFS root at '${LOWER:-/}', generation '$(cat "$STATE/boot-generation")'," \
+	"slot $("$STATE/bin/sh" "$STATE/check" slot "$(cat "$HOSTNAME_FILE")")," \
+	"probes: $(tr '\n' ' ' <"$STATE/probes-present")"
