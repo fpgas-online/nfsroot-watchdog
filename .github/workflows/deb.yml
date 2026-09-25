@@ -29,11 +29,12 @@ concurrency:
 jobs:
   test:
     # The clients run whatever busybox their root's suite has: bookworm's
-    # 1.35 (Raspberry Pi OS) and trixie's 1.37 both have to work.
+    # 1.35 (Raspberry Pi OS), trixie's 1.37 and forky's 1.38 all have to
+    # work. (sid has forky's.)
     strategy:
       fail-fast: false
       matrix:
-        suite: [bookworm, trixie]
+        suite: [bookworm, trixie, forky]
     runs-on: ubuntu-24.04
     container: debian:${{ matrix.suite }}
     steps:
@@ -71,7 +72,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [bookworm, trixie, sid]
+        suite: [bookworm, trixie, forky, sid]
         arch: [all]
     steps:
       - name: Check out
@@ -125,7 +126,7 @@ jobs:
       id-token: write
     uses: mithro/apt-repo-action/.github/workflows/publish-apt.yml@main
     with:
-      suites: "bookworm trixie sid"
+      suites: "bookworm trixie forky sid"
       architectures: "all"
       description: "Reboot NFS-root clients whose root has changed underneath them"
     secrets:
