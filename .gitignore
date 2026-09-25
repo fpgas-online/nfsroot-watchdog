@@ -3,6 +3,8 @@
 /debian/debhelper-build-stamp
 /debian/files
 /debian/*.substvars
+/debian/*.debhelper
+/debian/*.debhelper.log
 /debian/nfsroot-watchdog/
 /debian/nfsroot-watchdog-server/
 /tmp/
