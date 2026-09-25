@@ -6,5 +6,7 @@
 /debian/nfsroot-watchdog/
 /debian/nfsroot-watchdog-server/
 /tmp/
+# git worktrees for feature branches (superpowers:using-git-worktrees)
+/.worktrees/
 __pycache__/
 .pytest_cache/
