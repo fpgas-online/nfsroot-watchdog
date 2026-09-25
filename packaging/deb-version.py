@@ -8,9 +8,15 @@ upgradeable package with no manual bump and no tag. All forms are valid Debian
 versions verbatim, and match the hatch-vcs ``post-release`` scheme used for the
 PyPI wheel, so the .deb and the wheel carry the same version.
 
+``--suite`` adds ``~deb<R>`` for every suite but sid (``R`` is the Debian
+release number), so the older suite's build of a commit sorts lower and
+``apt full-upgrade`` across a release replaces it. ``--pr`` adds ``~pr<P>``
+last, so a pull request preview never upgrades over the build from main.
+These are mithro/apt-repo-action's docs/packaging.md rules ("Versions").
+
 Usage:
-    python3 packaging/deb-version.py                   # print the version
-    python3 packaging/deb-version.py --write-changelog # regenerate debian/changelog
+    python3 packaging/deb-version.py --suite trixie        # print the version
+    python3 packaging/deb-version.py --suite trixie [--pr 6] --write-changelog
 """
 from __future__ import annotations
 
@@ -28,7 +34,10 @@ _REPO_OVERRIDE = os.environ.get("DEB_VERSION_REPO")
 REPO = Path(_REPO_OVERRIDE) if _REPO_OVERRIDE else _DEFAULT_REPO
 CHANGELOG = REPO / "debian" / "changelog"
 SOURCE = "nfsroot-watchdog"
+GITHUB_REPOSITORY = "fpgas-online/nfsroot-watchdog"
 MAINTAINER = "Tim 'mithro' Ansell <me@mith.ro>"
+# Debian codename -> release number, for the ~deb<R> suffix. sid has none.
+DEBIAN_RELEASE = {"bookworm": 12, "trixie": 13, "forky": 14}
 
 
 def _git(*args: str) -> str:
@@ -92,29 +101,51 @@ def version() -> str:
         return "0.0"
 
 
-def write_changelog() -> None:
-    try:
-        describe = _git("describe", "--tags", "--always", "--long")
-        date = _git("log", "-1", "--format=%cd", "--date=rfc2822")
-    except Exception:
-        describe, date = "unknown", "Thu, 01 Jan 1970 00:00:00 +0000"
-    CHANGELOG.parent.mkdir(parents=True, exist_ok=True)
-    CHANGELOG.write_text(
-        f"{SOURCE} ({version()}) unstable; urgency=medium\n\n"
-        f"  * Automated build from git ({describe}).\n\n"
+def with_suffixes(base: str, suite: str, pr: int | None) -> str:
+    """Add ~deb<R> (every suite but sid) and then ~pr<P> (previews) to base."""
+    codename = suite.removeprefix("raspbian-")
+    if codename == "sid":
+        out = base
+    elif codename in DEBIAN_RELEASE:
+        out = f"{base}~deb{DEBIAN_RELEASE[codename]}"
+    else:
+        _fail(f"unknown suite {suite!r}: no Debian release number for its ~deb<R> suffix "
+              f"(known: {', '.join([*DEBIAN_RELEASE, 'sid'])})")
+    return f"{out}~pr{pr}" if pr else out
+
+
+def changelog_entry(ver: str, suite: str, sha: str, date: str) -> str:
+    """The one changelog entry a build carries (docs/packaging.md, "The changelog")."""
+    return (
+        f"{SOURCE} ({ver}) {suite}; urgency=medium\n\n"
+        f"  * Built from {GITHUB_REPOSITORY}@{sha}\n\n"
         f" -- {MAINTAINER}  {date}\n"
     )
 
 
+def write_changelog(ver: str, suite: str) -> None:
+    # The committer time, not the build time: dpkg-buildpackage takes
+    # SOURCE_DATE_EPOCH from this entry, so a rebuild is reproducible.
+    sha = _git("rev-parse", "HEAD")
+    date = _git("log", "-1", "--format=%cd", "--date=rfc2822")
+    CHANGELOG.parent.mkdir(parents=True, exist_ok=True)
+    CHANGELOG.write_text(changelog_entry(ver, suite, sha, date))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Derive the package version from git")
+    ap.add_argument("--suite", required=True,
+                    help="the suite being built for: bookworm, trixie, forky, sid (or raspbian-<codename>)")
+    ap.add_argument("--pr", type=int, default=None,
+                    help="pull request number, for a preview build")
     ap.add_argument("--write-changelog", action="store_true",
                     help="regenerate debian/changelog for the git-derived version")
     args = ap.parse_args()
+    ver = with_suffixes(version(), args.suite, args.pr)
     if args.write_changelog:
-        write_changelog()
+        write_changelog(ver, args.suite)
     else:
-        print(version())
+        print(ver)
 
 
 if __name__ == "__main__":
