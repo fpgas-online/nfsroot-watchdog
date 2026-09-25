@@ -118,7 +118,8 @@ The next successful update publishes both.
 ## Install
 
 The packages are published as a signed apt repository per Debian suite
-(bookworm, trixie, sid; `Architecture: all`). Use the `fpgas.online` URL: the
+(bookworm, trixie, forky, sid; `Architecture: all`): put your suite's name in
+place of `trixie` below. Use the `fpgas.online` URL: the
 `fpgas-online.github.io` one redirects to it over plain http, which apt will
 not follow.
 
@@ -167,15 +168,21 @@ NFSROOT_WATCHDOG_TEST_BUSYBOX=/bin/busybox \
 NFSROOT_WATCHDOG_TEST_STATIC_BUSYBOX=/path/to/unpacked/busybox-static/busybox \
 python3 -m pytest tests/
 
-docker run --rm -v "$PWD:/src" -w /src debian:bookworm sh packaging/ci-build.sh
-docker run --rm -v "$PWD/built-debs:/debs:ro" -v "$PWD/packaging:/packaging:ro" \
+docker run --rm -e SUITE=bookworm -v "$PWD:/src" -w /src debian:bookworm sh packaging/ci-build.sh
+docker run --rm --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
+  --tmpfs /run:rw,noexec,nosuid,nodev \
+  -v "$PWD/built-debs:/debs:ro" -v "$PWD/packaging:/packaging:ro" \
   debian:bookworm sh /packaging/install-test.sh
 ```
 
+The build rewrites `debian/changelog` with the version (`0.0.post26~deb12`:
+git describe, plus the suite's `~deb<R>`); don't commit that. The install test
+wants `/run` mounted noexec, as an initramfs-booted root has it.
+
 The logic tests need Debian's dynamic `busybox` package, because the static
-build runs its own applets and ignores the fakes on `PATH`. CI runs them on
-bookworm and trixie, then builds, install-tests and (from `main`) publishes the
-packages.
+build runs its own applets and ignores the fakes on `PATH`. The `Debian
+packages` workflow runs them on bookworm, trixie and forky, then builds and
+install-tests for every suite and (from `main`) publishes the packages.
 
 ## License
 
