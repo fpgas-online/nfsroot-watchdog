@@ -167,17 +167,35 @@ the clients see them.
 NFSROOT_WATCHDOG_TEST_BUSYBOX=/bin/busybox \
 NFSROOT_WATCHDOG_TEST_STATIC_BUSYBOX=/path/to/unpacked/busybox-static/busybox \
 python3 -m pytest tests/
+```
 
-docker run --rm -e SUITE=bookworm -v "$PWD:/src" -w /src debian:bookworm sh packaging/ci-build.sh
+CI builds with [mithro/apt-repo-action](https://github.com/mithro/apt-repo-action)'s
+`build-deb` action, which can only run in GitHub Actions. The same build by
+hand, with a checkout of apt-repo-action next to this one (until
+mithro/apt-repo-action#14 merges, of its `docs/packaging-conventions` branch):
+
+```sh
+docker run --rm -v "$PWD:/src" -v "$PWD/../apt-repo-action:/apt-repo-action:ro" -w /src \
+  debian:bookworm bash -ec '
+    apt-get update
+    apt-get install -y --no-install-recommends \
+      build-essential ca-certificates debhelper dpkg-dev fakeroot git python3
+    apt-get build-dep -y ./
+    git config --global --add safe.directory "*"
+    python3 /apt-repo-action/scripts/deb-version.py --suite bookworm --write-changelog
+    dpkg-buildpackage -us -uc -A
+    mkdir -p built-debs && cp ../*.deb built-debs/'
+git checkout debian/changelog
 docker run --rm --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
   --tmpfs /run:rw,noexec,nosuid,nodev \
   -v "$PWD/built-debs:/debs:ro" -v "$PWD/packaging:/packaging:ro" \
   debian:bookworm sh /packaging/install-test.sh
 ```
 
-The build rewrites `debian/changelog` with the version (`0.0.post26~deb12`:
-git describe, plus the suite's `~deb<R>`); don't commit that. The install test
-wants `/run` mounted noexec, as an initramfs-booted root has it.
+The version comes from `git describe` plus the suite's `~deb<R>`
+(`0.0.post28~deb12`). The build adds it to `debian/changelog`; don't commit
+that. The install test wants `/run` mounted noexec, as an initramfs-booted root
+has it.
 
 The logic tests need Debian's dynamic `busybox` package, because the static
 build runs its own applets and ignores the fakes on `PATH`. The `Debian
