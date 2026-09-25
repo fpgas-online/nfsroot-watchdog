@@ -6,7 +6,8 @@ name: Debian packages
 # (https://fpgas.online/nfsroot-watchdog/<suite>/). Both packages are
 # Architecture: all (shell and Python), so one x86 build per suite serves
 # every architecture. A pull request runs the same tests and builds, and
-# publishes nothing. Versions come from git (packaging/deb-version.py).
+# publishes nothing. Versions come from git (apt-repo-action's shared
+# scripts/deb-version.py, run by its build-deb action).
 #
 # This follows mithro/apt-repo-action's docs/packaging.md; the differences
 # from its defaults are declared in .github/apt-packaging.toml.
@@ -51,10 +52,10 @@ jobs:
         run: >-
           shellcheck src/nfsroot-watchdog src/nfsroot-watchdog-arm
           src/nfsroot-watchdog-check src/defaults debian/nfsroot-watchdog.default
-          packaging/ci-build.sh packaging/install-test.sh
-      # ci-build.sh rewrites debian/changelog with the git-derived version on
-      # every build; a local build's output must never be committed in its
-      # place (it pins a stale version and names a commit that may not exist).
+          packaging/install-test.sh
+      # The build adds an entry with the git-derived version to
+      # debian/changelog; a local build's output must never be committed
+      # (it pins a stale version and names a commit that may not exist).
       - name: debian/changelog is the placeholder
         run: grep -q '^  \* Placeholder changelog\.' debian/changelog
       - name: pytest
@@ -78,16 +79,16 @@ jobs:
       - name: Check out
         uses: actions/checkout@v5
         with:
-          fetch-depth: 0  # full history + tags so deb-version.py can describe
+          fetch-depth: 0  # full history + tags: the version is git describe's
 
+      # The shared build: debian:<suite>, build deps from debian/control, and
+      # the version from the shared deb-version.py (with ~deb<R>, and ~pr<P>
+      # on a pull request). Writes the .debs to built-debs/.
       - name: Build
-        run: |
-          docker run --rm \
-            -e SUITE="${{ matrix.suite }}" \
-            -e PR="${{ github.event.pull_request.number }}" \
-            -v "${PWD}:/src" -w /src \
-            docker.io/library/debian:${{ matrix.suite }} \
-            sh packaging/ci-build.sh
+        uses: mithro/apt-repo-action/build-deb@docs/packaging-conventions  # TODO: @main once mithro/apt-repo-action#14 merges
+        with:
+          suite: ${{ matrix.suite }}
+          arch: ${{ matrix.arch }}
 
       # Install what was just built into a clean container of the same
       # suite: dependencies resolve, the units get enabled, the watchdog
