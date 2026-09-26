@@ -171,8 +171,7 @@ python3 -m pytest tests/
 
 CI builds with [mithro/apt-repo-action](https://github.com/mithro/apt-repo-action)'s
 `build-deb` action, which can only run in GitHub Actions. The same build by
-hand, with a checkout of apt-repo-action next to this one (until
-mithro/apt-repo-action#14 merges, of its `docs/packaging-conventions` branch):
+hand, with a checkout of apt-repo-action's `main` next to this one:
 
 ```sh
 docker run --rm -v "$PWD:/src" -v "$PWD/../apt-repo-action:/apt-repo-action:ro" -w /src \

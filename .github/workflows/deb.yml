@@ -85,7 +85,7 @@ jobs:
       # the version from the shared deb-version.py (with ~deb<R>, and ~pr<P>
       # on a pull request). Writes the .debs to built-debs/.
       - name: Build
-        uses: mithro/apt-repo-action/build-deb@docs/packaging-conventions  # TODO: @main once mithro/apt-repo-action#14 merges
+        uses: mithro/apt-repo-action/build-deb@main
         with:
           suite: ${{ matrix.suite }}
           arch: ${{ matrix.arch }}
