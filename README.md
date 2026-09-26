@@ -184,7 +184,6 @@ docker run --rm -v "$PWD:/src" -v "$PWD/../apt-repo-action:/apt-repo-action:ro" 
     python3 /apt-repo-action/scripts/deb-version.py --suite bookworm --write-changelog
     dpkg-buildpackage -us -uc -A
     mkdir -p built-debs && cp ../*.deb built-debs/'
-git checkout debian/changelog
 docker run --rm --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
   --tmpfs /run:rw,noexec,nosuid,nodev \
   -v "$PWD/built-debs:/debs:ro" -v "$PWD/packaging:/packaging:ro" \
@@ -192,9 +191,9 @@ docker run --rm --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
 ```
 
 The version comes from `git describe` plus the suite's `~deb<R>`
-(`0.0.post28~deb12`). The build adds it to `debian/changelog`; don't commit
-that. The install test wants `/run` mounted noexec, as an initramfs-booted root
-has it.
+(`0.0.post28~deb12`). There is no committed `debian/changelog`: the build
+writes one with just its own entry, and git ignores it. The install test wants
+`/run` mounted noexec, as an initramfs-booted root has it.
 
 The logic tests need Debian's dynamic `busybox` package, because the static
 build runs its own applets and ignores the fakes on `PATH`. The `Debian
