@@ -1,7 +1,0 @@
-nfsroot-watchdog (0.0.post0) unstable; urgency=medium
-
-  * Placeholder changelog. Each build adds an entry above this one with its
-    version, derived from git by mithro/apt-repo-action's shared
-    scripts/deb-version.py (rolling release).
-
- -- Tim 'mithro' Ansell <me@mith.ro>  Thu, 24 Sep 2026 00:00:00 +0000

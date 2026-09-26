@@ -1,6 +1,8 @@
 /built-debs/
 /debian/.debhelper/
 /debian/debhelper-build-stamp
+# Written by each build (apt-repo-action's scripts/deb-version.py); never committed.
+/debian/changelog
 /debian/files
 /debian/*.substvars
 /debian/*.debhelper
