@@ -1,10 +1,16 @@
 /built-debs/
 /debian/.debhelper/
 /debian/debhelper-build-stamp
+# Written by each build (apt-repo-action's scripts/deb-version.py); never committed.
+/debian/changelog
 /debian/files
 /debian/*.substvars
+/debian/*.debhelper
+/debian/*.debhelper.log
 /debian/nfsroot-watchdog/
 /debian/nfsroot-watchdog-server/
 /tmp/
+# git worktrees for feature branches (superpowers:using-git-worktrees)
+/.worktrees/
 __pycache__/
 .pytest_cache/

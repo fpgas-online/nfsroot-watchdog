@@ -1,53 +1,107 @@
-name: Debian Packages + apt repo
+name: Debian packages
 
-# Rolling release: every GREEN push to main builds nfsroot-watchdog and
-# nfsroot-watchdog-server for Debian bookworm, trixie and sid and republishes
-# a signed apt repository per suite on GitHub Pages
-# (https://fpgas.online/nfsroot-watchdog/<suite>/). Both packages
-# are Architecture: all (shell and Python), so one x86 build per suite serves
-# every architecture. The version is git-derived (vX.Y at a tag, vX.Y.postN
-# after it; 0.0.postN before the first tag).
+# Rolling release: every push to main tests, builds nfsroot-watchdog and
+# nfsroot-watchdog-server for each suite, and republishes a signed apt
+# repository per suite on GitHub Pages
+# (https://fpgas.online/nfsroot-watchdog/<suite>/). Both packages are
+# Architecture: all (shell and Python), so one x86 build per suite serves
+# every architecture. A pull request runs the same tests and builds, and
+# publishes nothing. Versions come from git (apt-repo-action's shared
+# scripts/deb-version.py, run by its build-deb action).
 #
-# Gated on CI: triggered when the "CI" workflow completes for main, and only
-# proceeds when that run succeeded, so a red commit never reaches the repo.
+# This follows mithro/apt-repo-action's docs/packaging.md; the differences
+# from its defaults are declared in .github/apt-packaging.toml.
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  push:
     branches: [main]
-  workflow_dispatch:
   pull_request:
+  workflow_dispatch:
 
-# Least privilege by default: only the publish job raises this, for itself.
-# actions:read stays because the workflow_run gating reads the CI run.
 permissions:
   contents: read
-  actions: read
+
+concurrency:
+  group: deb-${{ github.ref }}
+  # A newer push to a pull request cancels the older build. On the default
+  # branch a running publish is never cancelled: the newest push waits for it,
+  # and replaces any older push still waiting (it contains that one's commits).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  build-deb:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'pull_request' ||
-      github.event.workflow_run.conclusion == 'success'
-    runs-on: ubuntu-latest
+  test:
+    # The clients run whatever busybox their root's suite has: bookworm's
+    # 1.35 (Raspberry Pi OS), trixie's 1.37 and forky's 1.38 all have to
+    # work. (sid has forky's.)
     strategy:
       fail-fast: false
       matrix:
-        suite: [bookworm, trixie, sid]
+        suite: [bookworm, trixie, forky]
+    runs-on: ubuntu-24.04
+    container: debian:${{ matrix.suite }}
     steps:
-      - uses: actions/checkout@v5
-        with:
-          # The SHA CI validated, not whatever main is now.
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
-          fetch-depth: 0  # full history + tags so deb-version.py can describe
-
-      - name: Build packages in debian:${{ matrix.suite }}
+      # Before the checkout: without git in the container, actions/checkout
+      # downloads a tarball instead of cloning, and there is no index to ask
+      # what is tracked.
+      - name: Install test dependencies
         run: |
-          docker run --rm \
-            -v "${PWD}:/src" -w /src \
-            docker.io/library/debian:${{ matrix.suite }} \
-            sh packaging/ci-build.sh
+          apt-get update
+          # busybox: the dynamic, non-standalone build the logic tests fake
+          # applets around. busybox-static conflicts with it, so unpack
+          # that one for the smoke test instead of installing it.
+          apt-get install -y --no-install-recommends busybox ca-certificates git python3 python3-pytest shellcheck
+          cd /tmp && apt-get download busybox-static && dpkg-deb -x busybox-static_*.deb /tmp/bbs
+      - uses: actions/checkout@v5
+      - name: shellcheck
+        run: >-
+          shellcheck src/nfsroot-watchdog src/nfsroot-watchdog-arm
+          src/nfsroot-watchdog-check src/defaults debian/nfsroot-watchdog.default
+          packaging/install-test.sh
+      # The build generates debian/changelog: apt-repo-action's shared
+      # scripts/deb-version.py writes the build's entry, with the version
+      # derived from git. Committing a build's output would pin a stale
+      # version (and name a commit that may not exist), so it must not be
+      # tracked.
+      - name: debian/changelog is not committed
+        run: |
+          # The workspace belongs to the runner's user, not the container's
+          # root, and git won't read a tree owned by someone else.
+          git config --global --add safe.directory "$PWD"
+          git rev-parse --is-inside-work-tree
+          if git ls-files --error-unmatch debian/changelog; then
+            echo "::error file=debian/changelog::debian/changelog is committed, but the build generates it: git rm it"
+            exit 1
+          fi
+      - name: pytest
+        run: |
+          static=$(find /tmp/bbs -path '*/bin/busybox' -type f | head -n1)
+          test -n "$static"
+          export NFSROOT_WATCHDOG_TEST_BUSYBOX=/bin/busybox
+          export NFSROOT_WATCHDOG_TEST_STATIC_BUSYBOX="$static"
+          python3 -m pytest -v -rs tests/
+
+  build-deb:
+    name: build-deb (${{ matrix.suite }} ${{ matrix.arch }})
+    needs: test
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [bookworm, trixie, forky, sid]
+        arch: [all]
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # full history + tags: the version is git describe's
+
+      # The shared build: debian:<suite>, build deps from debian/control, and
+      # the version from the shared deb-version.py (with ~deb<R>, and ~pr<P>
+      # on a pull request). Writes the .debs to built-debs/.
+      - name: Build
+        uses: mithro/apt-repo-action/build-deb@main
+        with:
+          suite: ${{ matrix.suite }}
+          arch: ${{ matrix.arch }}
 
       # Install what was just built into a clean container of the same
       # suite: dependencies resolve, the units get enabled, the watchdog
@@ -57,7 +111,7 @@ jobs:
       # root; CAP_SYS_ADMIN (and no AppArmor mount denial) lets the arm
       # script mount its own tmpfs to execute from, as it does as root at
       # boot.
-      - name: Install test in debian:${{ matrix.suite }}
+      - name: Install test
         run: |
           docker run --rm \
             --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
@@ -66,15 +120,18 @@ jobs:
             docker.io/library/debian:${{ matrix.suite }} \
             sh /packaging/install-test.sh
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload
+        uses: actions/upload-artifact@v4
         with:
-          name: debs-${{ matrix.suite }}-all
+          name: debs-${{ matrix.suite }}-${{ matrix.arch }}
           path: built-debs/*.deb
+          retention-days: 14
 
   publish-apt:
-    # Build and install-test on PRs, but never publish from one: that would
-    # overwrite the live repository with unreviewed packages.
-    if: github.event_name != 'pull_request'
+    # Build and install-test pull requests, but never publish from one (or
+    # from any branch but main): that would overwrite the live repository
+    # with unreviewed packages.
+    if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
     needs: build-deb
     # Scoped to this job alone: the called workflow cannot exceed it.
     permissions:
@@ -83,7 +140,7 @@ jobs:
       id-token: write
     uses: mithro/apt-repo-action/.github/workflows/publish-apt.yml@main
     with:
-      suites: "bookworm trixie sid"
+      suites: "bookworm trixie forky sid"
       architectures: "all"
       description: "Reboot NFS-root clients whose root has changed underneath them"
     secrets:

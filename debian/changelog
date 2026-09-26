@@ -1,6 +1,0 @@
-nfsroot-watchdog (0.0.post0) unstable; urgency=medium
-
-  * Placeholder changelog. The real version is generated at build time by
-    packaging/deb-version.py --write-changelog (git-derived, rolling release).
-
- -- Tim 'mithro' Ansell <me@mith.ro>  Thu, 24 Sep 2026 00:00:00 +0000
