@@ -39,25 +39,38 @@ jobs:
     runs-on: ubuntu-24.04
     container: debian:${{ matrix.suite }}
     steps:
-      - uses: actions/checkout@v5
+      # Before the checkout: without git in the container, actions/checkout
+      # downloads a tarball instead of cloning, and there is no index to ask
+      # what is tracked.
       - name: Install test dependencies
         run: |
           apt-get update
           # busybox: the dynamic, non-standalone build the logic tests fake
           # applets around. busybox-static conflicts with it, so unpack
           # that one for the smoke test instead of installing it.
-          apt-get install -y --no-install-recommends busybox python3 python3-pytest shellcheck
+          apt-get install -y --no-install-recommends busybox ca-certificates git python3 python3-pytest shellcheck
           cd /tmp && apt-get download busybox-static && dpkg-deb -x busybox-static_*.deb /tmp/bbs
+      - uses: actions/checkout@v5
       - name: shellcheck
         run: >-
           shellcheck src/nfsroot-watchdog src/nfsroot-watchdog-arm
           src/nfsroot-watchdog-check src/defaults debian/nfsroot-watchdog.default
           packaging/install-test.sh
-      # The build adds an entry with the git-derived version to
-      # debian/changelog; a local build's output must never be committed
-      # (it pins a stale version and names a commit that may not exist).
-      - name: debian/changelog is the placeholder
-        run: grep -q '^  \* Placeholder changelog\.' debian/changelog
+      # The build generates debian/changelog: apt-repo-action's shared
+      # scripts/deb-version.py writes the build's entry, with the version
+      # derived from git. Committing a build's output would pin a stale
+      # version (and name a commit that may not exist), so it must not be
+      # tracked.
+      - name: debian/changelog is not committed
+        run: |
+          # The workspace belongs to the runner's user, not the container's
+          # root, and git won't read a tree owned by someone else.
+          git config --global --add safe.directory "$PWD"
+          git rev-parse --is-inside-work-tree
+          if git ls-files --error-unmatch debian/changelog; then
+            echo "::error file=debian/changelog::debian/changelog is committed, but the build generates it: git rm it"
+            exit 1
+          fi
       - name: pytest
         run: |
           static=$(find /tmp/bbs -path '*/bin/busybox' -type f | head -n1)
