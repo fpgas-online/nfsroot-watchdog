@@ -137,6 +137,10 @@ sudo apt install nfsroot-watchdog
 sudo apt install nfsroot-watchdog-server
 ```
 
+The repository's signing key is
+`FC0E 4835 E563 E003 D06C  F358 A105 FA06 79EC 6204`
+(`gpg --show-keys /etc/apt/keyrings/nfsroot-watchdog.gpg` shows it).
+
 `nfsroot-watchdog` depends on `busybox-static`, which replaces Debian's
 dynamically linked `busybox` package. On a machine whose root is not NFS it
 installs but stays idle.
