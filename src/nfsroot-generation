@@ -34,10 +34,41 @@ either.
 `begin` keeps an existing lock, so after a failed update the next
 successful one also publishes what the failed one changed. `end` without a
 lock cannot tell what changed and bumps.
+
+One directory per version
+-------------------------
+A server can instead keep every version of the root in its own directory,
+so that an update never changes a tree a client is running from:
+
+    BASE/versions/<name>/{boot,root}   one entry per version (or a symlink
+                                       to one)
+    BASE/current -> versions/<name>    what a client gets when it boots
+
+The new version is built elsewhere and renamed into BASE/versions/, then:
+
+    nfsroot-generation publish BASE NAME     make NAME current
+    nfsroot-generation rollback BASE NAME    make an earlier version current
+    nfsroot-generation list BASE             every version and its state (JSON)
+    nfsroot-generation inhibit BASE          no client reboots itself ...
+    nfsroot-generation uninhibit BASE        ... until this
+
+An entry is *published* once it has a marker. Each published entry holds
+VERSION_FILE (its own name, written once) and the same marker,
+"<epoch> <iso-time> <current version>". A client reads both from the
+version it booted and reboots when the marker names another version.
+`publish` writes the new version's files, swaps `current`, then writes the
+other published entries; `rollback` does the same for a published entry.
+Nothing here writes an entry outside its /etc/nfsroot-watchdog/, or
+writes an entry that was never published (an orphan). The fleet inhibit
+is per entry, so `inhibit` and `uninhibit` act on every published entry,
+and `publish` carries it to the new one. These commands hold a lock,
+BASE/nfsroot-generation.lock, while they run. Clients never see it.
 """
 
 import argparse
+import contextlib
 import datetime
+import fcntl
 import fnmatch
 import json
 import os
@@ -45,10 +76,21 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 GEN_FILE = "/etc/nfsroot-watchdog/generation"
+VERSION_FILE = "/etc/nfsroot-watchdog/version"
 LOCK_FILE = "/etc/nfsroot-watchdog/update.lock"
 FLEET_INHIBIT = "/etc/nfsroot-watchdog/inhibit"
+
+VERSIONS_DIR = "versions"
+CURRENT_LINK = "current"
+VERSIONS_LOCK = "nfsroot-generation.lock"
+# Clients count their reboot slots from the marker's epoch. A marker much
+# older than this, newly reaching a client, would put every slot in the past,
+# and those clients would reboot together. So repairing a publish reuses
+# the marker only while it is this fresh.
+FRESH_STAMP = 60
 
 # Paths (relative to the root, fnmatch patterns) whose changes never reach a
 # running client.
@@ -84,6 +126,8 @@ def _write_atomic(path, content):
     try:
         with os.fdopen(fd, "w") as f:
             f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
         os.chmod(tmp, 0o644)
         os.replace(tmp, path)
     except BaseException:
@@ -190,6 +234,204 @@ def status(root, lock=LOCK_FILE, gen=GEN_FILE):
     return out
 
 
+# --- one directory per version -------------------------------------------------
+
+
+class Refused(Exception):
+    """The layout is not what the command needs. Nothing has been written."""
+
+
+def _first_line(path):
+    try:
+        with open(path) as f:
+            return f.readline().strip()
+    except FileNotFoundError:
+        return None
+
+
+def _marker_version(marker):
+    fields = (marker or "").split()
+    return fields[2] if len(fields) >= 3 else None
+
+
+def _fresh(marker):
+    try:
+        epoch = int((marker or "").split()[0])
+    except (IndexError, ValueError):
+        return False
+    now = time.time()
+    return now - FRESH_STAMP <= epoch <= now + 5
+
+
+def _fsync_dir(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def _versions_lock(base, wait):
+    path = os.path.join(base, VERSIONS_LOCK)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        give_up = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= give_up:
+                    raise Refused(f"another nfsroot-generation has held {path} for {wait}s")
+                time.sleep(0.2)
+        yield
+    finally:
+        os.close(fd)
+
+
+def entries(base):
+    """Every name in BASE/versions that resolves to a directory with root/."""
+    vdir = os.path.join(base, VERSIONS_DIR)
+    out = {}
+    for name in sorted(os.listdir(vdir)):
+        path = os.path.join(vdir, name)
+        root = os.path.join(path, "root")
+        if name.startswith(".") or not os.path.isdir(root):
+            continue
+        marker = _first_line(_inside(root, GEN_FILE))
+        out[name] = {
+            "published": marker is not None,
+            "marker": marker,
+            "version": _first_line(_inside(root, VERSION_FILE)),
+            "inhibited": os.path.lexists(_inside(root, FLEET_INHIBIT)),
+            "locked": os.path.lexists(_inside(root, LOCK_FILE)),
+            "link": os.readlink(path) if os.path.islink(path) else None,
+        }
+    return out
+
+
+def current(base):
+    """The entry BASE/current names, or None (absent, or not an entry)."""
+    link = os.path.join(base, CURRENT_LINK)
+    if not os.path.lexists(link):
+        return None
+    if not os.path.islink(link):
+        raise Refused(f"{link} exists and is not a symlink")
+    full = os.path.normpath(os.path.join(base, os.readlink(link)))
+    if os.path.dirname(full) == os.path.join(base, VERSIONS_DIR):
+        return os.path.basename(full)
+    return None
+
+
+def _swap_current(base, name):
+    link = os.path.join(base, CURRENT_LINK)
+    tmp = os.path.join(base, f".{CURRENT_LINK}.{os.getpid()}")
+    os.symlink(os.path.join(VERSIONS_DIR, name), tmp)
+    try:
+        os.replace(tmp, link)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+    _fsync_dir(base)
+
+
+def make_current(base, name, rollback=False, wait=300):
+    """`publish` (rollback=False) or `rollback`: see the module docstring."""
+    base = os.path.abspath(base)
+    with _versions_lock(base, wait):
+        found = entries(base)
+        entry = os.path.join(base, VERSIONS_DIR, name)
+        if "/" in name or name not in found or not os.path.isdir(os.path.join(entry, "boot")):
+            raise Refused(f"{entry} is not a version: it needs boot/ and root/")
+        target = found[name]
+        if target["version"] not in (None, name):
+            raise Refused(f"{entry} says it is version {target['version']!r}")
+        locked = [n for n, e in found.items() if e["locked"] and (e["published"] or n == name)]
+        if locked:
+            raise Refused(f"{LOCK_FILE} exists in {', '.join(locked)}: a begin/end update "
+                          "is running there, or died; clients on it would never reboot")
+        was = current(base)
+        if rollback and not target["published"]:
+            raise Refused(f"{name} was never published: use publish")
+        if (not rollback and was != name and target["published"]
+                and _marker_version(target["marker"]) != name):
+            raise Refused(f"{name} was published before: use rollback to make it current again")
+
+        published = [n for n, e in found.items() if e["published"] and n != name]
+        marker = target["marker"]
+        if (was == name and _marker_version(marker) == name and target["version"] == name
+                and all(found[n]["marker"] == marker and found[n]["version"] for n in published)):
+            return {"current": name, "previous": was, "marker": marker, "changed": []}
+        # Reused only to repair a publish that died after the swap, and only
+        # while fresh (FRESH_STAMP); otherwise stamped now, just before the
+        # swap.
+        if not (was == name and _marker_version(marker) == name and _fresh(marker)):
+            marker = _stamp(name)
+        inhibit = found[was]["inhibited"] if was in found else False
+        inhibit_text = _first_line(_inside(os.path.join(base, VERSIONS_DIR, was, "root"),
+                                           FLEET_INHIBIT)) if inhibit else None
+        changed = []
+
+        def update(n, e, carry_inhibit):
+            root = os.path.join(base, VERSIONS_DIR, n, "root")
+            did = []
+            if e["version"] is None:
+                _write_atomic(_inside(root, VERSION_FILE), n + "\n")
+                did.append("version")
+            if carry_inhibit and inhibit and not e["inhibited"]:
+                _write_atomic(_inside(root, FLEET_INHIBIT), (inhibit_text or "") + "\n")
+                did.append("inhibit")
+            if carry_inhibit and not inhibit and e["inhibited"]:
+                os.unlink(_inside(root, FLEET_INHIBIT))
+                did.append("uninhibit")
+            if e["marker"] != marker:
+                _write_atomic(_inside(root, GEN_FILE), marker + "\n")
+                did.append("marker")
+            if did:
+                changed.append({"name": n, "wrote": did})
+
+        # (i) the new current version, before any client can boot it
+        update(name, target, carry_inhibit=True)
+        # (ii)
+        if was != name:
+            _swap_current(base, name)
+        # (iii) every other published version, so the clients on it see the
+        # change; never an orphan
+        for n in published:
+            update(n, found[n], carry_inhibit=False)
+        return {"current": name, "previous": was, "marker": marker, "changed": changed}
+
+
+def set_inhibit(base, on, reason="inhibit", wait=300):
+    """Create (on) or remove the fleet inhibit in every published entry."""
+    base = os.path.abspath(base)
+    with _versions_lock(base, wait):
+        found = {n: e for n, e in entries(base).items() if e["published"]}
+        if not found:
+            raise Refused(f"no published version in {base}/{VERSIONS_DIR}: nothing to hold")
+        content = _stamp(reason)
+        changed = []
+        for n, e in found.items():
+            path = _inside(os.path.join(base, VERSIONS_DIR, n, "root"), FLEET_INHIBIT)
+            if on and not e["inhibited"]:
+                _write_atomic(path, content + "\n")
+                changed.append(n)
+            elif not on and e["inhibited"]:
+                os.unlink(path)
+                changed.append(n)
+        return {"inhibited": on, "changed": changed}
+
+
+def list_versions(base):
+    base = os.path.abspath(base)
+    now = current(base)
+    return {
+        "current": now,
+        "versions": [{"name": n, "current": n == now, **e} for n, e in entries(base).items()],
+    }
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="nfsroot-generation",
@@ -221,7 +463,42 @@ def main(argv=None):
     r.add_argument("--bump", choices=("auto", "always", "never"), default="auto")
     r.add_argument("command", nargs=argparse.REMAINDER, help="-- command to run")
 
+    # One directory per version. These always use the default paths inside
+    # each version (--lock and --generation do not apply).
+    def with_base(p, name=False, wait=True):
+        p.add_argument("base", help=f"the directory holding {VERSIONS_DIR}/ and {CURRENT_LINK}")
+        if name:
+            p.add_argument("name", help=f"the version: its name in {VERSIONS_DIR}/")
+        if wait:
+            p.add_argument("--wait", type=int, default=300, metavar="SECONDS",
+                           help="how long to wait for another of these commands (300)")
+        return p
+
+    with_base(sub.add_parser("publish", help="make a new version current"), name=True)
+    with_base(sub.add_parser("rollback", help="make an earlier version current"), name=True)
+    with_base(sub.add_parser("list", help="every version and its state"), wait=False)
+    i = with_base(sub.add_parser("inhibit", help="hold every client's self-reboot"))
+    i.add_argument("--reason", default="inhibit", help="free text recorded in the inhibit file")
+    with_base(sub.add_parser("uninhibit", help="release the hold"))
+
     args = ap.parse_args(argv)
+    if "base" in args:
+        if not os.path.isdir(os.path.join(args.base, VERSIONS_DIR)):
+            ap.error(f"{args.base} has no {VERSIONS_DIR}/ directory")
+        try:
+            if args.cmd in ("publish", "rollback"):
+                result = make_current(args.base, args.name, args.cmd == "rollback", args.wait)
+            elif args.cmd == "list":
+                result = list_versions(args.base)
+            else:
+                result = set_inhibit(args.base, args.cmd == "inhibit",
+                                     getattr(args, "reason", "inhibit"), args.wait)
+        except Refused as e:
+            print(f"nfsroot-generation {args.cmd}: {e}", file=sys.stderr)
+            return 1
+        json.dump(result, sys.stdout)
+        print()
+        return 0
     if not os.path.isdir(args.root):
         ap.error(f"{args.root} is not a directory")
 
