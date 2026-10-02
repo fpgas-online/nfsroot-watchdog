@@ -5,6 +5,7 @@ ENABLED=1
 LOWER=auto
 ROOT=
 GEN_FILE=/etc/nfsroot-watchdog/generation
+VERSION_FILE=/etc/nfsroot-watchdog/version
 LOCK_FILE=/etc/nfsroot-watchdog/update.lock
 FLEET_INHIBIT=/etc/nfsroot-watchdog/inhibit
 INHIBIT=/run/nfsroot-watchdog.inhibit

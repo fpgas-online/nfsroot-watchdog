@@ -45,6 +45,12 @@ status)
 	else
 		printf '%-18s %s\n' "root generation:" none
 	fi
+	# "NFS root:", "root generation:" and "version:" are read by other
+	# tools (fpgas.online's verify-pi): label, colon, spaces, value.
+	version_file=${VERSION_FILE:-/etc/nfsroot-watchdog/version}
+	if [ -e "$LOWER$version_file" ]; then
+		printf '%-18s %s\n' "version:" "$(head -n 1 "$LOWER$version_file")"
+	fi
 	if [ -e "$LOWER$LOCK_FILE" ]; then
 		printf '%-18s %s\n' "update lock:" "$(head -n 1 "$LOWER$LOCK_FILE")"
 	fi
