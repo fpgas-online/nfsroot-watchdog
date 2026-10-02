@@ -16,6 +16,10 @@
 # Written into the root by the server, see nfsroot-generation(1). Paths
 # inside the root.
 #GEN_FILE=/etc/nfsroot-watchdog/generation
+# Present only where the server keeps each version of the root in its own
+# directory: the version's name. The client then reboots when GEN_FILE
+# names another version as current, rather than when GEN_FILE changes.
+#VERSION_FILE=/etc/nfsroot-watchdog/version
 #LOCK_FILE=/etc/nfsroot-watchdog/update.lock
 # Create this file in the root to stop every client from rebooting itself.
 #FLEET_INHIBIT=/etc/nfsroot-watchdog/inhibit

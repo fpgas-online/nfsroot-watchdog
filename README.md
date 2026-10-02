@@ -28,6 +28,7 @@ Two packages, one small protocol inside the exported root:
 |---|---|---|
 | `/etc/nfsroot-watchdog/update.lock` | `nfsroot-generation begin` | an update is in progress: clients hold still |
 | `/etc/nfsroot-watchdog/generation` | `nfsroot-generation end` | `<epoch> <iso-time> <reason>`, replaced whenever an update changed the root |
+| `/etc/nfsroot-watchdog/version` | the server, where each version of the root has its own directory | the version's name; the marker is then `<epoch> <iso-time> <current version>` in every version |
 | `/etc/nfsroot-watchdog/inhibit` | a person | no client reboots itself while this exists |
 
 **`nfsroot-watchdog`** (install in the client root) runs a check once a
@@ -36,7 +37,10 @@ through the NFS mount itself: overlayroot's lower layer `/media/root-ro`, or `/`
 for a plain NFS root. That view sees the server's new files. The client
 reboots when:
 
-1. **the generation differs** from the one it booted with; or
+1. **the generation differs** from the one it booted with. If the root it
+   booted has a `version` file, the test is instead that the generation's
+   third field names a different version: a machine already on the current
+   version never reboots, even after a rollback to it; or
 2. **probe files stay stale** (`/var/lib/dpkg/status`, `/etc/ld.so.cache`, the
    generation marker, plus any you add) on two checks in a row, *and* the root
    has been quiet for an hour. This catches updates made without
@@ -160,6 +164,10 @@ nfsroot-watchdog inhibit    # keep this machine up until its next boot (or relea
 nfsroot-watchdog release
 journalctl -u nfsroot-watchdog -u nfsroot-watchdog-arm
 ```
+
+Three lines of `status` are a stable interface for other tools: `NFS root:`,
+`root generation:` and (only where the root has a version file) `version:`.
+Each is the label, a colon, spaces and the value, alone on its line.
 
 To stop the whole fleet, `touch <root>/etc/nfsroot-watchdog/inhibit` on the
 server. `nfsroot-generation status <root>` shows the lock and the generation as
