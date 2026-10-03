@@ -119,6 +119,44 @@ nothing doesn't reboot anyone. If an update fails part-way, the lock stays: the
 clients keep running on the old root rather than reboot into a half-built one.
 The next successful update publishes both.
 
+**One directory per version.** Updating a root in place always leaves some
+clients on stale files until they reboot. A server can avoid that by never
+changing a tree a client runs from. It keeps each version of the root in its
+own directory and points a `current` symlink at the one clients should boot:
+
+```
+/srv/nfs/rpi/versions/<name>/{boot,root}   one entry per version (or a symlink to one)
+/srv/nfs/rpi/current -> versions/<name>    what a client gets when it boots
+```
+
+Build the new version elsewhere on the same filesystem, rename it into
+`versions/`, then:
+
+```sh
+nfsroot-generation publish  /srv/nfs/rpi <name>   # make it current
+nfsroot-generation rollback /srv/nfs/rpi <name>   # make an earlier one current again
+nfsroot-generation list     /srv/nfs/rpi          # every version, current, published, inhibited (JSON)
+nfsroot-generation inhibit  /srv/nfs/rpi [--reason TEXT]   # hold every client's self-reboot
+nfsroot-generation uninhibit /srv/nfs/rpi
+```
+
+`publish` writes `version` (the entry's name, once) and a marker naming the new
+version into it. Then it swaps `current`, then writes the same marker into every
+other published version. Clients on an older version see a marker naming
+another version and reboot, staggered as usual. Clients on the current version
+stay put, also after a `rollback`. Running `publish` again is safe: it finishes
+a publish that died part-way. An entry that was never published is never
+written. The fleet inhibit lives in each version, so use `inhibit` and
+`uninhibit` rather than `touch`, and `publish` carries it to the new version.
+Note the two tools: `nfsroot-generation inhibit BASE`, on the server, holds
+**every** client; `nfsroot-watchdog inhibit`, on a client, holds only that one
+machine, until its next boot.
+These commands wait for each other (a `flock` on
+`/srv/nfs/rpi/nfsroot-generation.lock`). Every write is a temp file and a
+rename, so versions that share identical files by hard link
+(`rsync --link-dest`) are never changed through each other. Old versions are
+kept until you delete them; never delete one a client still runs.
+
 ## Install
 
 The packages are published as a signed apt repository per Debian suite

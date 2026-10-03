@@ -17,10 +17,12 @@ Debian's static busybox, with no fakes at all.
     pytest tests/
 """
 
+import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -845,6 +847,40 @@ def test_unreadable_version_file_falls_back_to_the_boot_snapshot(versioned):
     assert "generation changed" in versioned.kmsg.read_text()
 
 
+@needs_busybox
+def test_publish_and_rollback_drive_the_client(tmp_path):
+    """The server's real output, read by the real client: a machine booted
+    from v1 reboots for v2's publish, and a rollback to v1 calls it off."""
+    c = Client(tmp_path / "client", BUSYBOX)
+    base = tmp_path / "rpi"
+    v1 = base / "versions/v1"
+    (v1 / "boot").mkdir(parents=True)
+    (v1 / "root").symlink_to(c.lower)  # the client booted v1
+
+    def server(*args):
+        r = subprocess.run([sys.executable, str(SRC / "nfsroot-generation"), *map(str, args)],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        return json.loads(r.stdout)
+
+    server("publish", base, "v1")
+    assert "version 'v1'" in c.arm()
+    c.set_now(int(time.time()))
+    c.check()
+    assert c.deadline() is None
+
+    (base / "versions/v2/boot").mkdir(parents=True)
+    (base / "versions/v2/root").mkdir()
+    published = server("publish", base, "v2")
+    c.check()
+    assert c.deadline() == int(published["marker"].split()[0]) + 420 + 33 * 20
+    assert "this machine runs 'v1', the current version is 'v2'" in c.kmsg.read_text()
+
+    server("rollback", base, "v1")
+    c.check()
+    assert c.deadline() is None
+
+
 # --- the reboot warning ------------------------------------------------------
 
 
@@ -1011,10 +1047,11 @@ def test_cli_status_lines_other_tools_read(versioned):
 
 
 def test_protocol_paths_match_the_server():
-    """Client defaults and nfsroot-generation must agree on the three paths."""
+    """Client defaults and nfsroot-generation must agree on the four paths."""
     defaults = (SRC / "defaults").read_text()
     server = (SRC / "nfsroot-generation").read_text()
-    for var, path in (("GEN_FILE", GEN), ("LOCK_FILE", LOCK), ("FLEET_INHIBIT", FLEET_INHIBIT)):
+    for var, path in (("GEN_FILE", GEN), ("VERSION_FILE", VERSION), ("LOCK_FILE", LOCK),
+                      ("FLEET_INHIBIT", FLEET_INHIBIT)):
         assert f"{var}={path}\n" in defaults
         assert f'{var} = "{path}"' in server
 
