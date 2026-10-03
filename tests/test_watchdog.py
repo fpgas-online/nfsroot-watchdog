@@ -800,6 +800,32 @@ def test_version_file_added_after_boot_is_used(client):
 
 
 @needs_busybox
+def test_replaced_marker_is_not_a_stale_probe_on_a_versioned_root(versioned):
+    # A rollback to this machine's version (or a released inhibit) renames
+    # a new marker into the version it runs: through the overlay, the
+    # marker answers ESTALE. The version rule has already decided: stay.
+    versioned.set_now(T0 + 7200)
+    versioned.age_lower_dirs(7200)
+    versioned.write_lower(GEN, f"{T0 + 7200} y v1\n")
+    versioned.age_lower_dirs(7200)
+    versioned.stale(GEN)
+    for _ in range(3):
+        versioned.check()
+    assert versioned.deadline() is None
+    assert "stale files" not in versioned.kmsg.read_text()
+
+
+@needs_busybox
+def test_marker_is_still_a_probe_on_a_single_root(client):
+    client.set_now(T0 + 7200)
+    client.age_lower_dirs(7200)
+    client.stale(GEN)
+    client.check()
+    client.check()
+    assert f"stale files for 2 checks: {GEN}" in client.kmsg.read_text()
+
+
+@needs_busybox
 def test_marker_without_a_version_field_uses_the_boot_snapshot(versioned):
     # e.g. `nfsroot-generation end` on a root that has a version file
     versioned.write_lower(GEN, f"{T0 - 86400} 2026-09-23T00:00:00Z v1\n")
@@ -879,6 +905,41 @@ def test_publish_and_rollback_drive_the_client(tmp_path):
     server("rollback", base, "v1")
     c.check()
     assert c.deadline() is None
+
+
+@needs_busybox
+def test_released_fleet_inhibit_restarts_the_stagger_on_the_client(tmp_path):
+    """A board on v1, held while v2 is published, released long after its
+    slot: it staggers from the release, not WARN_BEFORE after it."""
+    c = Client(tmp_path / "client", BUSYBOX)
+    base = tmp_path / "rpi"
+    (base / "versions/v1/boot").mkdir(parents=True)
+    (base / "versions/v1/root").symlink_to(c.lower)
+
+    def server(*args):
+        r = subprocess.run([sys.executable, str(SRC / "nfsroot-generation"), *map(str, args)],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        return json.loads(r.stdout)
+
+    server("publish", base, "v1")
+    c.arm()
+    server("inhibit", base)
+    (base / "versions/v2/boot").mkdir(parents=True)
+    (base / "versions/v2/root").mkdir()
+    server("publish", base, "v2")
+    # The hold lasted an hour: the marker this board reads is that old.
+    now = int(time.time())
+    c.write_lower(GEN, f"{now - 3600} 2026-10-03T00:00:00Z v2\n")
+    c.set_now(now)
+    assert "fleet inhibit" in c.check()
+    released = server("uninhibit", base)
+    c.check()
+    epoch = int(released["marker"].split()[0])
+    assert abs(epoch - now) < 60
+    # From the release, slot by slot. Counted from the publish, it would
+    # have been now + 300 s, the same moment for every held board.
+    assert c.deadline() == epoch + 420 + 33 * 20
 
 
 # --- the reboot warning ------------------------------------------------------
