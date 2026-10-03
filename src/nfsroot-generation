@@ -367,8 +367,11 @@ def make_current(base, name, rollback=False, wait=300):
 
         published = [n for n, e in found.items() if e["published"] and n != name]
         marker = target["marker"]
+        # Complete when every published entry names NAME as current. The
+        # epochs may differ: `uninhibit` restamps all but the current one.
         if (was == name and _marker_version(marker) == name and target["version"] == name
-                and all(found[n]["marker"] == marker and found[n]["version"] for n in published)):
+                and all(_marker_version(found[n]["marker"]) == name and found[n]["version"]
+                        for n in published)):
             return {"current": name, "previous": was, "marker": marker, "changed": []}
         # Reused only to repair a publish that died after the swap, and only
         # while fresh (FRESH_STAMP); otherwise stamped now, just before the
@@ -425,16 +428,25 @@ def set_inhibit(base, on, reason="inhibit", wait=300):
         changed = []
         now = current(base)
         marker = None
-        if not on and now in found and any(e["inhibited"] for e in found.values()):
+        warning = None
+        if not on and any(e["inhibited"] for e in found.values()):
             # Clients count their slots from the marker's epoch. After a hold
             # longer than the stagger every slot is in the past, and every
             # held client would reboot at once, WARN_BEFORE after the release.
             # So restart the stagger: the same current version, stamped now,
-            # written while the inhibit still holds them.
-            marker = _stamp(now)
-            for n in found:
-                _write_atomic(_inside(os.path.join(base, VERSIONS_DIR, n, "root"), GEN_FILE),
-                              marker + "\n")
+            # written while the inhibit still holds them. Not into the
+            # current version: its clients stay put anyway, and a client
+            # older than the version rule would take its replaced marker
+            # for a stale file.
+            if now in found:
+                marker = _stamp(now)
+                for n in found:
+                    if n != now:
+                        _write_atomic(_inside(os.path.join(base, VERSIONS_DIR, n, "root"),
+                                              GEN_FILE), marker + "\n")
+            else:
+                warning = (f"{CURRENT_LINK} names no published version: the stagger is not "
+                           "restarted, and clients whose slot has passed reboot together")
         for n, e in found.items():
             path = _inside(os.path.join(base, VERSIONS_DIR, n, "root"), FLEET_INHIBIT)
             if on and not e["inhibited"]:
@@ -443,7 +455,11 @@ def set_inhibit(base, on, reason="inhibit", wait=300):
             elif not on and e["inhibited"]:
                 os.unlink(path)
                 changed.append(n)
-        return {"inhibited": on, "changed": changed, "marker": marker}
+        result = {"inhibited": on, "changed": changed, "marker": marker}
+        if warning:
+            result["warning"] = warning
+            print(f"nfsroot-generation uninhibit: warning: {warning}", file=sys.stderr)
+        return result
 
 
 def list_versions(base):

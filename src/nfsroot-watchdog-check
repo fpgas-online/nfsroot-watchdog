@@ -321,8 +321,9 @@ examine_root() {
 	for p in $PROBES; do
 		# On a versioned root the server replaces the marker in the version
 		# this machine runs (a rollback to it, a released inhibit), and the
-		# version rule above already decided what that means.
-		if [ -n "$version" ] && [ "$p" = "$GEN_FILE" ]; then
+		# version rule above already decided what that means (when it ran:
+		# both the version file and the marker were readable).
+		if [ -n "$version" ] && [ -n "$current" ] && [ "$p" = "$GEN_FILE" ]; then
 			continue
 		fi
 		if out=$(stat -c %i "$ROOT$p" 2>&1); then
