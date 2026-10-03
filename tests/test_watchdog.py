@@ -18,6 +18,7 @@ Debian's static busybox, with no fakes at all.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -707,6 +708,143 @@ def test_dry_run_only_logs_once_and_writes_no_terminal(tmp_path):
     assert not (c.dev / "pts/0").exists()
 
 
+# --- versions of the root: one directory each ------------------------------
+#
+# A server that keeps every version of the root in its own directory writes
+# VERSION_FILE (the version's name) into each one, and the same marker,
+# "<epoch> <iso> <current version>", into all of them. A machine reads both
+# from the version it booted.
+
+VERSION = "/etc/nfsroot-watchdog/version"
+
+
+@pytest.fixture
+def versioned(tmp_path):
+    c = Client(tmp_path, BUSYBOX)
+    c.write_lower(VERSION, "v1\n")
+    c.write_lower(GEN, f"{T0 - 86400} 2026-09-23T00:00:00Z v1\n")
+    c.arm()
+    return c
+
+
+@needs_busybox
+def test_marker_naming_this_version_never_reboots(versioned):
+    for i in range(3):
+        versioned.set_now(T0 + 60 * i)
+        versioned.check()
+    assert versioned.deadline() is None
+
+
+@needs_busybox
+def test_marker_naming_another_version_reboots_at_the_slot(versioned):
+    gen = T0 + 1000
+    versioned.set_now(gen + 30)
+    versioned.write_lower(GEN, f"{gen} 2026-09-24T02:00:00Z v2\n")
+    versioned.check()
+    assert versioned.deadline() == gen + 420 + 33 * 20
+    assert "this machine runs 'v1', the current version is 'v2'" in versioned.kmsg.read_text()
+    assert versioned.run_until_reboot(limit=40)
+
+
+@needs_busybox
+def test_rollback_to_this_version_cancels_the_reboot(versioned):
+    versioned.set_now(T0 + 100)
+    versioned.write_lower(GEN, f"{T0 + 100} x v2\n")
+    versioned.check()
+    deadline = versioned.deadline()
+    versioned.set_now(deadline - 360)
+    versioned.check()
+    assert versioned.warned_at() is not None
+    # Rolled back: a fresh marker that names v1 again. The old rule would
+    # see a marker unlike the boot snapshot and reboot anyway.
+    versioned.write_lower(GEN, f"{deadline - 300} y v1\n")
+    versioned.set_now(deadline - 300)
+    versioned.check()
+    assert versioned.deadline() is None
+    assert "CANCELLED: the NFS root is consistent again" in versioned.console.read_text()
+    versioned.set_now(deadline + 600)
+    versioned.check()
+    assert versioned.rebooted() == []
+
+
+@needs_busybox
+def test_booting_the_current_version_after_a_publish_stays_put(tmp_path):
+    # Booted after the swap: the marker already names this version.
+    c = Client(tmp_path, BUSYBOX)
+    c.write_lower(VERSION, "v2\n")
+    c.write_lower(GEN, f"{T0 - 60} x v2\n")
+    assert "version 'v2'" in c.arm()
+    c.set_now(T0 + 3600)
+    c.check()
+    assert c.deadline() is None
+
+
+@needs_busybox
+def test_version_file_added_after_boot_is_used(client):
+    # The legacy in-place root: booted with an old-style marker and no
+    # version file. The first versioned publish adds both.
+    client.set_now(T0 + 100)
+    client.write_lower(VERSION, "legacy\n")
+    client.write_lower(GEN, f"{T0 + 100} x v2\n")
+    client.check()
+    assert "this machine runs 'legacy', the current version is 'v2'" in client.kmsg.read_text()
+
+    # A rollback to the legacy root cancels it, though the marker is unlike
+    # the one this machine booted with.
+    client.write_lower(GEN, f"{T0 + 200} y legacy\n")
+    client.set_now(T0 + 200)
+    client.check()
+    assert client.deadline() is None
+
+
+@needs_busybox
+def test_marker_without_a_version_field_uses_the_boot_snapshot(versioned):
+    # e.g. `nfsroot-generation end` on a root that has a version file
+    versioned.write_lower(GEN, f"{T0 - 86400} 2026-09-23T00:00:00Z v1\n")
+    versioned.set_now(T0 + 100)
+    versioned.check()
+    assert versioned.deadline() is None
+    versioned.write_lower(GEN, f"{T0 + 100} 2026-09-24T00:00:00Z\n")
+    versioned.check()
+    assert "generation changed" in versioned.kmsg.read_text()
+
+
+@needs_busybox
+def test_unreadable_marker_with_a_version_file_is_not_a_change(versioned):
+    # The boot snapshot names v1, but an unreadable marker must not be
+    # replaced by anything that could name another version.
+    versioned.write_lower(GEN, f"{T0} x v2\n")
+    marker = versioned.lower / GEN.lstrip("/")
+    marker.chmod(0)
+    try:
+        if os.access(marker, os.R_OK):
+            pytest.skip("running as root: cannot make the marker unreadable")
+        versioned.set_now(T0 + 100)
+        out = versioned.check()
+    finally:
+        marker.chmod(0o644)
+    assert "cannot read" in out
+    assert versioned.deadline() is None
+
+
+@needs_busybox
+def test_unreadable_version_file_falls_back_to_the_boot_snapshot(versioned):
+    vfile = versioned.lower / VERSION.lstrip("/")
+    versioned.set_now(T0 + 100)
+    vfile.chmod(0)
+    try:
+        if os.access(vfile, os.R_OK):
+            pytest.skip("running as root: cannot make the version file unreadable")
+        out = versioned.check()
+        assert "cannot read /etc/nfsroot-watchdog/version (unreadable:" in out
+        assert versioned.deadline() is None  # the marker is as it was at boot
+        versioned.write_lower(GEN, f"{T0 + 100} x v1\n")  # a new stamp, same version
+        versioned.check()
+    finally:
+        vfile.chmod(0o644)
+    assert "generation changed" in versioned.kmsg.read_text()
+
+
 # --- the reboot warning ------------------------------------------------------
 
 
@@ -848,6 +986,28 @@ def test_cli_status_and_inhibit(client):
     cli("release")
     assert not client.inhibit.exists()
     assert cli("slot", "node7").strip() == "7"
+    assert "version:" not in out  # a root without a version file
+
+
+@needs_busybox
+def test_cli_status_lines_other_tools_read(versioned):
+    """`NFS root:`, `root generation:` and `version:` are an interface
+    (fpgas.online's verify-pi reads them): label, colon, spaces, value, and
+    nothing else on the line."""
+    env = {**versioned.env(), "PATH": str(Path(BUSYBOX).parent) + ":/usr/bin:/bin"}
+    versioned.write_lower(GEN, f"{T0} 2026-09-24T02:00:00Z v2\n")
+    r = subprocess.run([BUSYBOX, "sh", str(CLI), "status"], env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    lines = r.stdout.splitlines()
+
+    def value(label):
+        found = [m.group(1) for l in lines if (m := re.fullmatch(re.escape(label) + r":\s+(\S.*)", l))]
+        assert len(found) == 1, (label, lines)
+        return found[0]
+
+    assert value("NFS root") == str(versioned.lower)
+    assert value("root generation") == f"{T0} 2026-09-24T02:00:00Z v2"
+    assert value("version") == "v1"
 
 
 def test_protocol_paths_match_the_server():

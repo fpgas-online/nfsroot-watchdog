@@ -19,7 +19,9 @@
 # Triggers, in order of preference:
 #   1. generation: the server has changed GEN_FILE since this machine booted.
 #      `nfsroot-generation end` (package nfsroot-watchdog-server) writes it
-#      as the last step of an update that changed the root.
+#      as the last step of an update that changed the root. Where the root
+#      has a VERSION_FILE (one directory per version of the root), the
+#      trigger is instead that GEN_FILE names another version as current.
 #   2. stale: a probe file has gone stale (ESTALE, or vanished) on CONFIRM
 #      consecutive checks, and the NFS root's busiest directories have been
 #      quiet for QUIET seconds. Catches root changes made without
@@ -277,11 +279,36 @@ examine_root() {
 	unreadable:*)
 		# Not evidence of a change: never reboot on an error we cannot place.
 		log "cannot read $GEN_FILE: $gen"
-		gen=$boot_gen
+		gen=
 		;;
 	esac
-	if [ "$gen" != "$boot_gen" ]; then
+	# A server that keeps each version of the root in its own directory
+	# writes VERSION_FILE into every version (its own name, never changed)
+	# and names the current version in the marker's third field, in every
+	# version. Then "the marker names another version" is the trigger: a
+	# machine on the current version stays put, whatever the marker said
+	# when it booted (a rollback back to its version, a version file that
+	# appeared after boot). Read every time, not at arm: the server adds
+	# the file to a version that was already booted.
+	version=$(read_lower "$VERSION_FILE")
+	case $version in
+	none) version= ;;
+	estale | unreadable:*)
+		log "cannot read $VERSION_FILE ($version), comparing the marker with the one at boot"
+		version=
+		;;
+	esac
+	current=$(echo "$gen" | sed -n 's/^[^ ]* [^ ]* \([^ ]*\).*$/\1/p')
+	if [ -z "$gen" ]; then
+		:
+	elif [ -n "$version" ] && [ -n "$current" ]; then
+		if [ "$current" != "$version" ]; then
+			reason="version changed: this machine runs '$version', the current version is '$current'"
+		fi
+	elif [ "$gen" != "$boot_gen" ]; then
 		reason="generation changed: booted with '$boot_gen', root now '$gen'"
+	fi
+	if [ -n "$reason" ]; then
 		gen_epoch=${gen%% *}
 		if plausible_epoch "$gen_epoch"; then
 			ref=$gen_epoch

@@ -17,7 +17,7 @@ MOUNTS=${NFSROOT_WATCHDOG_MOUNTS:-/proc/mounts}
 BUSYBOX=${NFSROOT_WATCHDOG_BUSYBOX:-/bin/busybox}
 
 # Everything the check script reads from its config.
-VARS="LOWER ROOT GEN_FILE LOCK_FILE FLEET_INHIBIT INHIBIT PROBES QUIET_DIRS
+VARS="LOWER ROOT GEN_FILE VERSION_FILE LOCK_FILE FLEET_INHIBIT INHIBIT PROBES QUIET_DIRS
 HOSTNAME_FILE KMSG SYSTEMCTL SYSTEMD_SHUTDOWN SLOT SLOT_SED SLOT_STRIDE
 SLOT_BASE SLOTS SPACING JITTER BASE_DELAY WARN_BEFORE CHECK_INTERVAL CONSOLE
 DEV_DIR CONFIRM QUIET LOCK_MAX_AGE USER_GRACE DRY_RUN"
@@ -151,6 +151,12 @@ step="stage the check script"
 cp "$LIBDIR/nfsroot-watchdog-check" "$STATE/check"
 
 step="report"
+# Report only: the check reads the version file itself, every time.
+version=none
+if [ -e "$LOWER$VERSION_FILE" ]; then
+	version=$(head -n 1 "$LOWER$VERSION_FILE" 2>&1) || version="unreadable: $version"
+fi
 echo "armed: NFS root at '${LOWER:-/}', generation '$(cat "$STATE/boot-generation")'," \
 	"slot $("$STATE/bin/sh" "$STATE/check" slot "$(cat "$HOSTNAME_FILE")")," \
-	"probes: $(tr '\n' ' ' <"$STATE/probes-present")"
+	"probes: $(tr '\n' ' ' <"$STATE/probes-present")," \
+	"version '$version'"
