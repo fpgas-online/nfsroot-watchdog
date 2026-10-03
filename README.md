@@ -148,6 +148,9 @@ stay put, also after a `rollback`. Running `publish` again is safe: it finishes
 a publish that died part-way. An entry that was never published is never
 written. The fleet inhibit lives in each version, so use `inhibit` and
 `uninhibit` rather than `touch`, and `publish` carries it to the new version.
+Note the two tools: `nfsroot-generation inhibit BASE`, on the server, holds
+**every** client; `nfsroot-watchdog inhibit`, on a client, holds only that one
+machine, until its next boot.
 These commands wait for each other (a `flock` on
 `/srv/nfs/rpi/nfsroot-generation.lock`). Every write is a temp file and a
 rename, so versions that share identical files by hard link
