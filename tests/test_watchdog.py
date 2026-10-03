@@ -800,6 +800,32 @@ def test_version_file_added_after_boot_is_used(client):
 
 
 @needs_busybox
+def test_replaced_marker_is_not_a_stale_probe_on_a_versioned_root(versioned):
+    # A rollback to this machine's version (or a released inhibit) renames
+    # a new marker into the version it runs: through the overlay, the
+    # marker answers ESTALE. The version rule has already decided: stay.
+    versioned.set_now(T0 + 7200)
+    versioned.age_lower_dirs(7200)
+    versioned.write_lower(GEN, f"{T0 + 7200} y v1\n")
+    versioned.age_lower_dirs(7200)
+    versioned.stale(GEN)
+    for _ in range(3):
+        versioned.check()
+    assert versioned.deadline() is None
+    assert "stale files" not in versioned.kmsg.read_text()
+
+
+@needs_busybox
+def test_marker_is_still_a_probe_on_a_single_root(client):
+    client.set_now(T0 + 7200)
+    client.age_lower_dirs(7200)
+    client.stale(GEN)
+    client.check()
+    client.check()
+    assert f"stale files for 2 checks: {GEN}" in client.kmsg.read_text()
+
+
+@needs_busybox
 def test_marker_without_a_version_field_uses_the_boot_snapshot(versioned):
     # e.g. `nfsroot-generation end` on a root that has a version file
     versioned.write_lower(GEN, f"{T0 - 86400} 2026-09-23T00:00:00Z v1\n")
