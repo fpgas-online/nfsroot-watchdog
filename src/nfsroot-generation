@@ -121,7 +121,11 @@ def _stamp(label):
 
 def _write_atomic(path, content):
     """Temp file + rename: a new inode, as clients expect of the marker."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    d = os.path.dirname(path)
+    if not os.path.isdir(d):
+        os.makedirs(d)
+        # Readable by every client user, whatever the caller's umask.
+        os.chmod(d, 0o755)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".nfsroot-generation.")
     try:
         with os.fdopen(fd, "w") as f:
@@ -342,6 +346,9 @@ def make_current(base, name, rollback=False, wait=300):
     with _versions_lock(base, wait):
         found = entries(base)
         entry = os.path.join(base, VERSIONS_DIR, name)
+        if len(name.split()) != 1 or name != name.strip():
+            raise Refused(f"{name!r}: a version name is one word (clients read it from the "
+                          "marker's third field)")
         if "/" in name or name not in found or not os.path.isdir(os.path.join(entry, "boot")):
             raise Refused(f"{entry} is not a version: it needs boot/ and root/")
         target = found[name]
@@ -376,9 +383,10 @@ def make_current(base, name, rollback=False, wait=300):
         def update(n, e, carry_inhibit):
             root = os.path.join(base, VERSIONS_DIR, n, "root")
             did = []
-            if e["version"] is None:
-                _write_atomic(_inside(root, VERSION_FILE), n + "\n")
-                did.append("version")
+            # The inhibit before the marker, so no client sees the marker
+            # without the hold; the marker before a new version file, so a
+            # client on an entry with an older-style marker never sees the
+            # version file next to a marker that names no version.
             if carry_inhibit and inhibit and not e["inhibited"]:
                 _write_atomic(_inside(root, FLEET_INHIBIT), (inhibit_text or "") + "\n")
                 did.append("inhibit")
@@ -388,6 +396,9 @@ def make_current(base, name, rollback=False, wait=300):
             if e["marker"] != marker:
                 _write_atomic(_inside(root, GEN_FILE), marker + "\n")
                 did.append("marker")
+            if e["version"] is None:
+                _write_atomic(_inside(root, VERSION_FILE), n + "\n")
+                did.append("version")
             if did:
                 changed.append({"name": n, "wrote": did})
 

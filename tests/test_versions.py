@@ -98,7 +98,40 @@ def test_first_publish(base):
     assert abs(int(epoch) - time.time()) < 60
     assert version_file(base, "v1") == "v1"
     assert r == {"current": "v1", "previous": None, "marker": m,
-                 "changed": [{"name": "v1", "wrote": ["version", "marker"]}]}
+                 "changed": [{"name": "v1", "wrote": ["marker", "version"]}]}
+    assert (base / "versions/v1" / D).stat().st_mode & 0o777 == 0o755
+
+
+def test_directory_is_readable_whatever_the_umask(base):
+    add_version(base, "v1")
+    r = subprocess.run(["sh", "-c", f'umask 077 && exec "{sys.executable}" "{CLI}" publish "{base}" v1'],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert (base / "versions/v1" / D).stat().st_mode & 0o777 == 0o755
+    assert (base / "versions/v1" / D / "generation").stat().st_mode & 0o777 == 0o644
+
+
+def test_marker_lands_before_the_version_file(base, monkeypatch):
+    # The legacy root's old-style marker ("... 8803 files changed") next to
+    # a new version file would, for a moment, name the wrong version.
+    add_legacy(base)
+    add_version(base, "v1")
+    order = []
+    real = ng._write_atomic
+
+    def spy(path, content):
+        if "legacy" in path or "bookworm" in path:
+            order.append(os.path.basename(path))
+        real(path, content)
+
+    monkeypatch.setattr(ng, "_write_atomic", spy)
+    ng.make_current(str(base), "v1")
+    assert order == ["generation", "version"]
+
+
+def test_a_name_with_whitespace_is_refused(base):
+    add_version(base, "a b")
+    assert "one word" in refused("publish", base, "a b")
 
 
 def test_publish_gives_every_published_version_the_new_marker(base):
