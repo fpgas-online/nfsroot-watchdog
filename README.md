@@ -150,7 +150,10 @@ written. The fleet inhibit lives in each version, so use `inhibit` and
 `uninhibit` rather than `touch`, and `publish` carries it to the new version.
 Note the two tools: `nfsroot-generation inhibit BASE`, on the server, holds
 **every** client; `nfsroot-watchdog inhibit`, on a client, holds only that one
-machine, until its next boot.
+machine, until its next boot. `uninhibit` stamps the marker afresh (same
+current version) before it releases, so the stagger starts again from the
+release; otherwise, after a hold longer than the stagger, every held client
+would reboot at once.
 These commands wait for each other (a `flock` on
 `/srv/nfs/rpi/nfsroot-generation.lock`). Every write is a temp file and a
 rename, so versions that share identical files by hard link

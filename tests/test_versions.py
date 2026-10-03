@@ -342,7 +342,7 @@ def test_inhibit_holds_every_published_version_and_publish_carries_it(base):
     add_version(base, "v1")
     cli("publish", base, "v1")
     r = cli_json("inhibit", base, "--reason", "canary on pi-sw1-p10")
-    assert r == {"inhibited": True, "changed": ["legacy-bookworm", "v1"]}
+    assert r == {"inhibited": True, "changed": ["legacy-bookworm", "v1"], "marker": None}
     assert (tree / D / "inhibit").read_text().strip().endswith(" canary on pi-sw1-p10")
     assert cli_json("inhibit", base)["changed"] == []  # already held
 
@@ -351,9 +351,50 @@ def test_inhibit_holds_every_published_version_and_publish_carries_it(base):
     assert (base / "versions/v2" / D / "inhibit").exists()
 
     r = cli_json("uninhibit", base)
-    assert r == {"inhibited": False, "changed": ["legacy-bookworm", "v1", "v2"]}
+    assert r["inhibited"] is False
+    assert r["changed"] == ["legacy-bookworm", "v1", "v2"]
     for name in ("legacy-bookworm", "v1", "v2"):
         assert not (base / "versions" / name / D / "inhibit").exists()
+        assert marker(base, name) == r["marker"]
+
+
+def test_uninhibit_restarts_the_stagger(base):
+    # Held for longer than the stagger: counted from the publish, every
+    # client's slot would be past and all would reboot together.
+    add_version(base, "v1")
+    cli("publish", base, "v1")
+    cli("inhibit", base)
+    add_version(base, "v2")
+    cli("publish", base, "v2")
+    held = f"{int(time.time()) - 7200} 2026-10-03T00:00:00Z v2"
+    for name in ("v1", "v2"):
+        (base / "versions" / name / D / "generation").write_text(held + "\n")
+    r = cli_json("uninhibit", base)
+    epoch, _iso, name = r["marker"].split()
+    assert name == "v2"
+    assert abs(int(epoch) - time.time()) < 60
+    assert marker(base, "v1") == marker(base, "v2") == r["marker"]
+
+
+def test_uninhibit_restamps_before_it_releases(base, monkeypatch):
+    # A client must never see the release next to the old epoch.
+    add_version(base, "v1")
+    ng.make_current(str(base), "v1")
+    ng.set_inhibit(str(base), True)
+    order = []
+    real_write, real_unlink = ng._write_atomic, os.unlink
+    monkeypatch.setattr(ng, "_write_atomic", lambda p, c: (order.append("marker"), real_write(p, c)))
+    monkeypatch.setattr(ng.os, "unlink", lambda p: (order.append("release"), real_unlink(p)))
+    ng.set_inhibit(str(base), False)
+    assert order == ["marker", "release"]
+
+
+def test_uninhibit_with_nothing_held_changes_nothing(base):
+    add_version(base, "v1")
+    cli("publish", base, "v1")
+    before = marker(base, "v1")
+    assert cli_json("uninhibit", base) == {"inhibited": False, "changed": [], "marker": None}
+    assert marker(base, "v1") == before
 
 
 def test_rollback_carries_the_inhibit_state_of_the_current_version(base):

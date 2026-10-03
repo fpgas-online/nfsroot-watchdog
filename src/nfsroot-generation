@@ -423,6 +423,18 @@ def set_inhibit(base, on, reason="inhibit", wait=300):
             raise Refused(f"no published version in {base}/{VERSIONS_DIR}: nothing to hold")
         content = _stamp(reason)
         changed = []
+        now = current(base)
+        marker = None
+        if not on and now in found and any(e["inhibited"] for e in found.values()):
+            # Clients count their slots from the marker's epoch. After a hold
+            # longer than the stagger every slot is in the past, and every
+            # held client would reboot at once, WARN_BEFORE after the release.
+            # So restart the stagger: the same current version, stamped now,
+            # written while the inhibit still holds them.
+            marker = _stamp(now)
+            for n in found:
+                _write_atomic(_inside(os.path.join(base, VERSIONS_DIR, n, "root"), GEN_FILE),
+                              marker + "\n")
         for n, e in found.items():
             path = _inside(os.path.join(base, VERSIONS_DIR, n, "root"), FLEET_INHIBIT)
             if on and not e["inhibited"]:
@@ -431,7 +443,7 @@ def set_inhibit(base, on, reason="inhibit", wait=300):
             elif not on and e["inhibited"]:
                 os.unlink(path)
                 changed.append(n)
-        return {"inhibited": on, "changed": changed}
+        return {"inhibited": on, "changed": changed, "marker": marker}
 
 
 def list_versions(base):
